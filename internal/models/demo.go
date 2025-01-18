@@ -20,13 +20,31 @@ func NewMatch() *Match {
 }
 
 func (m *Match) GetOrCreatePlayerStats(steamID uint64, name string) *PlayerStats {
-	stats, exists := m.PlayerStats[steamID]
-	if !exists {
-		stats = &PlayerStats{
-			Name:        name,
-			SteamID:     steamID,
-			WeaponStats: make(map[string]*WeaponStats),
+	// First try by SteamID if provided
+	if steamID != 0 {
+		if stats, exists := m.PlayerStats[steamID]; exists {
+			return stats
 		}
+	}
+
+	// If no SteamID or not found, try to find by name
+	for _, stats := range m.PlayerStats {
+		if stats.Name == name {
+			return stats
+		}
+	}
+
+	// If neither found, create new stats
+	stats := &PlayerStats{
+		Name:            name,
+		SteamID:         steamID,
+		WeaponStats:     make(map[string]*WeaponStats),
+		SurvivalByPhase: make(map[string]int),
+		MapAreaKills:    make(map[string]int),
+		MapAreaDeaths:   make(map[string]int),
+	}
+
+	if steamID != 0 {
 		m.PlayerStats[steamID] = stats
 	}
 	return stats
