@@ -2,10 +2,13 @@ package parser
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"time"
 
+	"github.com/golang/geo/r3"
 	dem "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs"
+	common "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/common"
 	events "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/events"
 	"github.com/richardkiene/CS2Coach/internal/models"
 )
@@ -37,7 +40,6 @@ func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
 	p.parser = dem.NewParser(f)
 	defer p.parser.Close()
 
-	// Register core event handlers first
 	p.registerEventHandlers(debug)
 
 	header, err := p.parser.ParseHeader()
@@ -45,11 +47,9 @@ func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
 		return nil, err
 	}
 
-	// Initialize match data
 	p.match.MapName = header.MapName
 	p.match.TickRate = p.parser.TickRate()
 
-	// Track players and their state
 	p.parser.RegisterEventHandler(func(e events.MatchStart) {
 		for _, player := range p.parser.GameState().Participants().Playing() {
 			if player.SteamID64 == 0 {
@@ -61,8 +61,7 @@ func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
 		}
 	})
 
-	// Track damage for assists
-	lastDamageBy := make(map[uint64]map[uint64]int) // victim -> attacker -> damage
+	lastDamageBy := make(map[uint64]map[uint64]int)
 
 	p.parser.RegisterEventHandler(func(e events.PlayerHurt) {
 		if e.Attacker == nil || e.Player == nil || e.Attacker.SteamID64 == 0 || e.Player.SteamID64 == 0 || e.Attacker.SteamID64 == e.Player.SteamID64 {
@@ -83,13 +82,12 @@ func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
 			return
 		}
 
-		// Process assists
 		victimID := e.Victim.SteamID64
 		killerID := e.Killer.SteamID64
 
 		if damages, exists := lastDamageBy[victimID]; exists {
 			for attackerID, damage := range damages {
-				if attackerID != killerID && damage >= 41 { // Assist threshold: 41+ damage
+				if attackerID != killerID && damage >= 41 {
 					for _, player := range p.parser.GameState().Participants().All() {
 						if player.SteamID64 == attackerID {
 							attackerStats := p.match.GetOrCreatePlayerStats(attackerID, player.Name)
@@ -102,7 +100,6 @@ func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
 			delete(lastDamageBy, victimID)
 		}
 
-		// Track flash assists
 		if e.AssistedFlash {
 			for _, player := range p.parser.GameState().Participants().Playing() {
 				if player.Team != e.Victim.Team && player.FlashDurationTime() > 0 {
@@ -125,11 +122,45 @@ func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
 }
 
 func (p *Parser) registerEventHandlers(debug bool) {
-	p.parser.RegisterEventHandler(func(e events.Kill) { p.handleKill(e, debug) })
-	p.parser.RegisterEventHandler(p.handleWeaponFire)
+	p.parser.RegisterEventHandler(func(e events.Kill) {
+		p.handleKill(e, debug)
+		p.handleSprayControl(e)
+		p.handlePeekTracking(e)
+	})
+	p.parser.RegisterEventHandler(func(e events.WeaponFire) {
+		p.handleWeaponFire(e)
+		p.handleFirstBulletAccuracy(e)
+	})
 	p.parser.RegisterEventHandler(p.handlePlayerHurt)
-	p.parser.RegisterEventHandler(p.handleRoundStart)
+	p.parser.RegisterEventHandler(func(e events.RoundStart) {
+		p.handleRoundStart(e)
+		p.handleEquipmentTracking(e)
+	})
 	p.parser.RegisterEventHandler(p.handleRoundEnd)
+
+	p.parser.RegisterEventHandler(func(e events.GrenadeEvent) {
+		if e.Thrower != nil {
+			stats := p.match.GetOrCreatePlayerStats(e.Thrower.SteamID64, e.Thrower.Name)
+			if e.Grenade.Type == common.EqFlash {
+				stats.FlashesThrown++
+			} else if e.Grenade.Type == common.EqSmoke {
+				stats.SmokesThrown++
+			}
+		}
+	})
+
+	p.parser.RegisterEventHandler(func(e events.FlashExplode) {
+		if e.Thrower != nil {
+			stats := p.match.GetOrCreatePlayerStats(e.Thrower.SteamID64, e.Thrower.Name)
+			var flashedCount int
+			for _, player := range p.parser.GameState().Participants().Playing() {
+				if player.FlashDurationTime() > 0 {
+					flashedCount++
+				}
+			}
+			stats.EnemiesFlashed += flashedCount
+		}
+	})
 }
 
 func (p *Parser) handleKill(e events.Kill, debug bool) {
@@ -155,12 +186,10 @@ func (p *Parser) handleKill(e events.Kill, debug bool) {
 		killerStats.Headshots++
 	}
 
-	// Update weapon stats
 	if weaponStats := killerStats.GetOrCreateWeaponStats(e.Weapon.String()); weaponStats != nil {
 		weaponStats.Kills++
 	}
 
-	// Handle trade kills
 	now := time.Now()
 	if p.lastKillTime != nil && now.Sub(*p.lastKillTime).Seconds() <= 3.0 {
 		killerStats.TradeKills++
@@ -172,7 +201,6 @@ func (p *Parser) handleKill(e events.Kill, debug bool) {
 	p.lastKillVictim = victimStats.SteamID
 	p.lastKillKiller = killerStats
 
-	// Update map area stats
 	if area := getMapArea(Point{
 		X: float32(e.Killer.Position().X),
 		Y: float32(e.Killer.Position().Y),
@@ -257,7 +285,6 @@ func (p *Parser) handleRoundStart(e events.RoundStart) {
 	p.roundStartTime = time.Now()
 	p.alivePlayersByTeam = make(map[int]int)
 
-	// Reset player states and update alive counts
 	for _, player := range p.parser.GameState().Participants().Playing() {
 		if player.SteamID64 == 0 {
 			continue
@@ -280,7 +307,6 @@ func (p *Parser) handleRoundStart(e events.RoundStart) {
 }
 
 func (p *Parser) handleRoundEnd(e events.RoundEnd) {
-	// Update survival stats
 	for _, player := range p.parser.GameState().Participants().Playing() {
 		if player.SteamID64 == 0 {
 			continue
@@ -309,6 +335,74 @@ func (p *Parser) handleRoundEnd(e events.RoundEnd) {
 			"timestamp": time.Now().Unix(),
 		},
 	})
+}
+
+func (p *Parser) handleFirstBulletAccuracy(e events.WeaponFire) {
+	if e.Shooter == nil {
+		return
+	}
+
+	stats := p.match.GetOrCreatePlayerStats(e.Shooter.SteamID64, e.Shooter.Name)
+	stats.FirstBulletShots++
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		if stats.HitsTotal > 0 {
+			stats.FirstBulletHits++
+		}
+	}()
+}
+
+func (p *Parser) handleSprayControl(e events.Kill) {
+	if e.Killer == nil || p.lastKillKiller == nil {
+		return
+	}
+
+	if e.Killer.SteamID64 == p.lastKillKiller.SteamID &&
+		time.Since(*p.lastKillTime) < time.Second {
+		p.lastKillKiller.SprayTransfers++
+	}
+}
+
+func (p *Parser) handlePeekTracking(e events.Kill) {
+	if e.Killer == nil || e.Victim == nil {
+		return
+	}
+
+	killerStats := p.match.GetOrCreatePlayerStats(e.Killer.SteamID64, e.Killer.Name)
+
+	killerPos := e.Killer.Position()
+	victimPos := e.Victim.Position()
+	killerAngle := e.Killer.ViewDirectionX()
+
+	if isQuickPeek(killerPos, victimPos, killerAngle) {
+		killerStats.PeekKills++
+	}
+}
+
+func isQuickPeek(killerPos, victimPos r3.Vector, killerAngle float32) bool {
+	deltaX := victimPos.X - killerPos.X
+	deltaY := victimPos.Y - killerPos.Y
+
+	angle := float32(math.Atan2(float64(deltaY), float64(deltaX))) * 180 / math.Pi
+	angleDiff := math.Abs(float64(angle - killerAngle))
+
+	return angleDiff <= 45
+}
+
+func (p *Parser) handleEquipmentTracking(e events.RoundStart) {
+	for _, player := range p.parser.GameState().Participants().Playing() {
+		if player.SteamID64 == 0 {
+			continue
+		}
+
+		stats := p.match.GetOrCreatePlayerStats(player.SteamID64, player.Name)
+		stats.EquipmentValue = int(player.EquipmentValueCurrent())
+
+		if stats.EquipmentValue < 4000 && stats.EquipmentValue > 2000 {
+			stats.MoneySpent += stats.EquipmentValue
+		}
+	}
 }
 
 type Point struct {

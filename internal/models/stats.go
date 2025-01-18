@@ -11,23 +11,60 @@ type PlayerStats struct {
 	Headshots       int
 	ShotsTotal      int
 	HitsTotal       int
-	FlashAssists    int
-	UtilityDamage   int
 	OpeningDuels    int
 	OpeningDuelsWon int
-	ClutchAttempts  int
-	ClutchesWon     int
 	IsAlive         bool
 	Team            int
 
 	// Enhanced stats
-	WeaponStats     map[string]*WeaponStats
-	TradeKills      int
 	TimesTraded     int
 	RoundsSurvived  int
 	SurvivalByPhase map[string]int // early, mid, late, clutch
 	MapAreaKills    map[string]int
 	MapAreaDeaths   map[string]int
+
+	// Aim metrics
+	FirstBulletHits   int
+	FirstBulletShots  int
+	FlickKills        int
+	SprayTransfers    int
+	PreFireKills      int
+	ReactionTimeTotal float64
+	ReactionTimeCount int
+
+	// Positioning metrics
+	CounterStrafeKills int
+	PeekKills          int
+	PeekDeaths         int
+	FlashAssists       int
+	SiteHolds          int
+	RotationKills      int
+
+	// Utility metrics
+	FlashesThrown  int
+	EnemiesFlashed int
+	SmokesThrown   int
+	MolotovDamage  int
+	UtilityDamage  int
+
+	// Decision making
+	ForceBuyKills  int
+	ForceBuyDeaths int
+	ClutchAttempts int
+	ClutchesWon    int
+	EntryAttempts  int
+	EntryKills     int
+	TradeKills     int
+	TradeDeaths    int
+	RetakeKills    int
+
+	// Economic tracking
+	MoneySpent     int
+	EquipmentValue int
+
+	// Enhanced weapon stats
+	WeaponStats   map[string]*WeaponStats
+	SprayPatterns map[string][]Point
 }
 
 func (ps *PlayerStats) Debug() string {
@@ -52,6 +89,10 @@ type WeaponStats struct {
 	Hits      int
 	Headshots int
 	Damage    int
+}
+
+type Point struct {
+	X, Y, Z float32
 }
 
 type AnalyzedStats struct {

@@ -78,7 +78,7 @@ func (m *Model) Train(matches []*models.Match) error {
 				features[i] = analyzed.AdvancedStats[feature]
 			}
 
-			impactScore := analyzer.CalculateImpactScore(&analyzed.BasicStats, len(match.Events))
+			impactScore := analyzer.CalculateImpactScore(&analyzed.BasicStats)
 			m.trainData = append(m.trainData, TrainingInstance{
 				Features: features,
 				Label:    impactScore,
