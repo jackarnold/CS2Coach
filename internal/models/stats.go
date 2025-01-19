@@ -65,6 +65,59 @@ type PlayerStats struct {
 	// Enhanced weapon stats
 	WeaponStats   map[string]*WeaponStats
 	SprayPatterns map[string][]Point
+
+	// Leetify metrics
+	EnemySpottedShots int
+	EnemySpottedHits  int
+
+	CounterStrafedShots  int
+	SprayShots           int
+	SprayHits            int
+	CrosshairAdjustments []float64
+	TotalDamage          int
+	TimeToFirstDamage    []float64
+	TradedDeaths         int
+	UtilityStats         UtilityStats
+}
+
+type UtilityStats struct {
+	HEGrenadesThrown   int
+	HEDamage           int
+	FlashesThrown      int
+	MolotovsThrown     int
+	SmokesThrown       int
+	EnemiesFlashed     int
+	TeammatesFlashed   int
+	FlashAssists       int
+	TotalBlindDuration float64
+}
+
+type LeetifyMetrics struct {
+	LeetifyRating         float64
+	AccuracyEnemySpotted  float64
+	HeadshotAccuracy      float64
+	CounterStrafing       float64
+	SprayAccuracy         float64
+	CrosshairPlacement    float64
+	ADR                   float64
+	TimeToFirstDamage     float64
+	SpottedAccuracy       float64
+	TradeKillPercentage   float64
+	TradedDeathPercentage float64
+	UtilityMetrics        UtilityMetrics
+}
+
+type UtilityMetrics struct {
+	HEPerGame                 float64
+	HEDamagePerGame           float64
+	FlashesPerGame            float64
+	MolotovsPerGame           float64
+	SmokesPerGame             float64
+	EnemiesFlashedPerGame     float64
+	FlashAssistsPerGame       float64
+	AvgBlindDuration          float64
+	TeammatesFlashedPerGame   float64
+	TotalBlindDurationPerGame float64
 }
 
 func (ps *PlayerStats) Debug() string {

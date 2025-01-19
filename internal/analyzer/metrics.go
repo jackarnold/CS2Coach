@@ -2,6 +2,93 @@ package analyzer
 
 import "github.com/richardkiene/CS2Coach/internal/models"
 
+func CalculateLeetifyMetrics(stats *models.PlayerStats, roundCount int) *models.LeetifyMetrics {
+	metrics := &models.LeetifyMetrics{}
+
+	// Accuracy metrics
+	if stats.EnemySpottedShots > 0 {
+		metrics.AccuracyEnemySpotted = float64(stats.EnemySpottedHits) / float64(stats.EnemySpottedShots) * 100
+	}
+
+	if stats.HitsTotal > 0 {
+		metrics.HeadshotAccuracy = float64(stats.Headshots) / float64(stats.HitsTotal) * 100
+	}
+
+	if stats.ShotsTotal > 0 {
+		metrics.CounterStrafing = float64(stats.CounterStrafedShots) / float64(stats.ShotsTotal) * 100
+	}
+
+	if stats.SprayShots > 0 {
+		metrics.SprayAccuracy = float64(stats.SprayHits) / float64(stats.SprayShots) * 100
+	}
+
+	// Average crosshair placement
+	if len(stats.CrosshairAdjustments) > 0 {
+		sum := 0.0
+		for _, adj := range stats.CrosshairAdjustments {
+			sum += adj
+		}
+		metrics.CrosshairPlacement = sum / float64(len(stats.CrosshairAdjustments))
+	}
+
+	// ADR and Time to Damage
+	metrics.ADR = float64(stats.TotalDamage) / float64(roundCount)
+
+	if len(stats.TimeToFirstDamage) > 0 {
+		sum := 0.0
+		for _, time := range stats.TimeToFirstDamage {
+			sum += time
+		}
+		metrics.TimeToFirstDamage = sum / float64(len(stats.TimeToFirstDamage))
+	}
+
+	// Trade metrics
+	if stats.Kills > 0 {
+		metrics.TradeKillPercentage = float64(stats.TradeKills) / float64(stats.Kills) * 100
+	}
+
+	if stats.Deaths > 0 {
+		metrics.TradedDeathPercentage = float64(stats.TradedDeaths) / float64(stats.Deaths) * 100
+	}
+
+	// Utility metrics per game
+	gamesPlayed := float64(roundCount) / 30.0 // Approximate games from rounds
+	metrics.UtilityMetrics = CalculateUtilityMetrics(&stats.UtilityStats, gamesPlayed)
+
+	// Calculate overall Leetify Rating
+	metrics.LeetifyRating = calculateLeetifyRating(stats, metrics)
+
+	return metrics
+}
+
+func CalculateUtilityMetrics(stats *models.UtilityStats, games float64) models.UtilityMetrics {
+	return models.UtilityMetrics{
+		HEPerGame:                 float64(stats.HEGrenadesThrown) / games,
+		HEDamagePerGame:           float64(stats.HEDamage) / games,
+		FlashesPerGame:            float64(stats.FlashesThrown) / games,
+		MolotovsPerGame:           float64(stats.MolotovsThrown) / games,
+		SmokesPerGame:             float64(stats.SmokesThrown) / games,
+		EnemiesFlashedPerGame:     float64(stats.EnemiesFlashed) / games,
+		TeammatesFlashedPerGame:   float64(stats.TeammatesFlashed) / games,
+		FlashAssistsPerGame:       float64(stats.FlashAssists) / games,
+		AvgBlindDuration:          stats.TotalBlindDuration / float64(stats.EnemiesFlashed),
+		TotalBlindDurationPerGame: stats.TotalBlindDuration / games,
+	}
+}
+
+func calculateLeetifyRating(stats *models.PlayerStats, metrics *models.LeetifyMetrics) float64 {
+	// Base rating from KDA
+	rating := (float64(stats.Kills)*1.0 + float64(stats.Assists)*0.7) / float64(stats.Deaths+1) * 100
+
+	// Impact multipliers
+	rating *= (1 + metrics.ADR/300.0)                   // Damage impact
+	rating *= (1 + metrics.HeadshotAccuracy/200.0)      // Aim impact
+	rating *= (1 + float64(stats.FlashAssists)/50.0)    // Utility impact
+	rating *= (1 + metrics.TradedDeathPercentage/200.0) // Trading impact
+
+	return rating
+}
+
 // CalculateAimScore returns detailed aim metrics (0-100)
 func CalculateAimScore(stats *models.PlayerStats) map[string]float64 {
 	metrics := make(map[string]float64)
@@ -12,11 +99,18 @@ func CalculateAimScore(stats *models.PlayerStats) map[string]float64 {
 	}
 
 	// Spray control
-	metrics["SprayControl"] = float64(stats.SprayTransfers) / float64(stats.Kills) * 100
+	if stats.Kills > 0 {
+		metrics["SprayControl"] = float64(stats.SprayTransfers) / float64(stats.Kills) * 100
+	}
 
 	// Average reaction time (ms)
 	if stats.ReactionTimeCount > 0 {
 		metrics["AverageReactionTime"] = stats.ReactionTimeTotal / float64(stats.ReactionTimeCount)
+	}
+
+	// Headshot percentage
+	if stats.Kills > 0 {
+		metrics["HeadshotPercentage"] = float64(stats.Headshots) / float64(stats.Kills) * 100
 	}
 
 	return metrics

@@ -77,13 +77,87 @@ func handleAnalyze(demoPath, playerName, steamID string, debug, verbose bool) {
 		log.Fatal("Player not found in demo")
 	}
 
+	// Display Leetify metrics and score
+	displayLeetifyMetrics(stats, verbose)
+
 	c := coach.NewCoach()
 	advice, err := c.GetAdvice(stats)
 	if err != nil {
 		log.Fatalf("Error getting coaching advice: %v", err)
 	}
 
+	fmt.Println("\nCoaching Advice:")
 	fmt.Println(advice)
+}
+
+func displayLeetifyMetrics(stats *models.AnalyzedStats, verbose bool) {
+	// Calculate all metrics
+	aimMetrics := analyzer.CalculateAimScore(&stats.BasicStats)
+	positioningMetrics := analyzer.CalculatePositioningScore(&stats.BasicStats)
+	utilityMetrics := analyzer.CalculateUtilityScore(&stats.BasicStats)
+	decisionMetrics := analyzer.CalculateDecisionScore(&stats.BasicStats)
+	impactScore := analyzer.CalculateImpactScore(&stats.BasicStats)
+
+	// Calculate Leetify metrics
+	roundCount := len(stats.BasicStats.SurvivalByPhase)
+	leetifyMetrics := analyzer.CalculateLeetifyMetrics(&stats.BasicStats, roundCount)
+
+	// Display metrics
+	fmt.Printf("\nLeetify Analysis:\n")
+	fmt.Printf("Overall Rating: %.2f\n", impactScore)
+
+	// Combat Metrics
+	fmt.Printf("\nCombat Performance:\n")
+	fmt.Printf("- K/D/A: %d/%d/%d\n", stats.BasicStats.Kills, stats.BasicStats.Deaths, stats.BasicStats.Assists)
+	fmt.Printf("- ADR: %.1f\n", leetifyMetrics.ADR)
+	fmt.Printf("- Headshot %%: %.1f%%\n", leetifyMetrics.HeadshotAccuracy)
+	fmt.Printf("- Enemy Spotted Accuracy: %.1f%%\n", leetifyMetrics.AccuracyEnemySpotted)
+	fmt.Printf("- Spray Control: %.1f%%\n", leetifyMetrics.SprayAccuracy)
+	fmt.Printf("- Counter-Strafe Accuracy: %.1f%%\n", leetifyMetrics.CounterStrafing)
+	fmt.Printf("- Time to Damage: %.3fs\n", leetifyMetrics.TimeToFirstDamage)
+
+	// Trade Metrics
+	fmt.Printf("\nTrade Statistics:\n")
+	fmt.Printf("- Trade Kills: %d (%.1f%%)\n", stats.BasicStats.TradeKills, leetifyMetrics.TradeKillPercentage)
+	fmt.Printf("- Times Traded: %d (%.1f%%)\n", stats.BasicStats.TradedDeaths, leetifyMetrics.TradedDeathPercentage)
+
+	// Utility Usage
+	fmt.Printf("\nUtility Impact:\n")
+	for metric, value := range utilityMetrics {
+		fmt.Printf("- %s: %.1f\n", metric, value)
+	}
+	fmt.Printf("Per Game Metrics:\n")
+	fmt.Printf("- Enemies Flashed: %.1f\n", leetifyMetrics.UtilityMetrics.EnemiesFlashedPerGame)
+	fmt.Printf("- HE Damage: %.1f\n", leetifyMetrics.UtilityMetrics.HEDamagePerGame)
+	fmt.Printf("- Flash Duration: %.1fs\n", leetifyMetrics.UtilityMetrics.AvgBlindDuration)
+
+	if verbose {
+		fmt.Printf("\nDetailed Weapon Statistics:\n")
+		for weapon, stats := range stats.BasicStats.WeaponStats {
+			if stats.Shots > 0 {
+				accuracy := float64(stats.Hits) / float64(stats.Shots) * 100
+				hsRate := float64(stats.Headshots) / float64(stats.Kills) * 100
+				fmt.Printf("- %s: %d kills, %.1f%% accuracy, %.1f%% HS\n",
+					weapon, stats.Kills, accuracy, hsRate)
+			}
+		}
+
+		fmt.Printf("\nAdvanced Metrics:\n")
+		fmt.Printf("Aim Score Components:\n")
+		for metric, value := range aimMetrics {
+			fmt.Printf("- %s: %.1f\n", metric, value)
+		}
+
+		fmt.Printf("\nPositioning Score Components:\n")
+		for metric, value := range positioningMetrics {
+			fmt.Printf("- %s: %.1f\n", metric, value)
+		}
+
+		fmt.Printf("\nDecision Making Score Components:\n")
+		for metric, value := range decisionMetrics {
+			fmt.Printf("- %s: %.1f\n", metric, value)
+		}
+	}
 }
 
 func handleTrain(demoDir, configPath string, debug bool, verbose bool) {

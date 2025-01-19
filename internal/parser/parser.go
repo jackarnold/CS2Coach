@@ -20,6 +20,10 @@ type Parser struct {
 	lastKillVictim     uint64
 	lastKillKiller     *models.PlayerStats
 	roundStartTime     time.Time
+	sprayStartTime     map[uint64]time.Time
+	currentSprayShots  map[uint64]int
+	enemySpottedTime   map[uint64]map[uint64]time.Time
+	firstDamageTime    map[uint64]map[uint64]time.Time
 	alivePlayersByTeam map[int]int
 }
 
@@ -27,6 +31,10 @@ func NewParser() *Parser {
 	return &Parser{
 		match:              models.NewMatch(),
 		alivePlayersByTeam: make(map[int]int),
+		sprayStartTime:     make(map[uint64]time.Time),
+		currentSprayShots:  make(map[uint64]int),
+		enemySpottedTime:   make(map[uint64]map[uint64]time.Time),
+		firstDamageTime:    make(map[uint64]map[uint64]time.Time),
 	}
 }
 
@@ -122,43 +130,176 @@ func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
 }
 
 func (p *Parser) registerEventHandlers(debug bool) {
+	// Handle spotted enemies
+	p.parser.RegisterEventHandler(func(e events.FrameDone) {
+		for _, player := range p.parser.GameState().Participants().Playing() {
+			for _, enemy := range p.parser.GameState().Participants().Playing() {
+				if player.Team == enemy.Team || player.SteamID64 == 0 || enemy.SteamID64 == 0 {
+					continue
+				}
+
+				if player.IsAlive() && enemy.IsAlive() && isVisible(player, enemy) {
+					spotterID := player.SteamID64
+					spottedID := enemy.SteamID64
+
+					if _, exists := p.enemySpottedTime[spotterID]; !exists {
+						p.enemySpottedTime[spotterID] = make(map[uint64]time.Time)
+					}
+					if _, exists := p.enemySpottedTime[spotterID][spottedID]; !exists {
+						p.enemySpottedTime[spotterID][spottedID] = time.Now()
+					}
+				}
+			}
+		}
+	})
+
+	// Handle weapon fires
+	p.parser.RegisterEventHandler(func(e events.WeaponFire) {
+		if e.Shooter == nil || e.Shooter.SteamID64 == 0 {
+			return
+		}
+
+		shooterID := e.Shooter.SteamID64
+		stats := p.match.GetOrCreatePlayerStats(shooterID, e.Shooter.Name)
+
+		// Check spotted enemies
+		for _, player := range p.parser.GameState().Participants().Playing() {
+			if player.Team == e.Shooter.Team {
+				continue
+			}
+			if spottedTime, exists := p.enemySpottedTime[shooterID][player.SteamID64]; exists {
+				if time.Since(spottedTime) < 2*time.Second {
+					stats.EnemySpottedShots++
+					break
+				}
+			}
+		}
+
+		// Track spray patterns
+		if _, exists := p.sprayStartTime[shooterID]; !exists {
+			p.sprayStartTime[shooterID] = time.Now()
+			p.currentSprayShots[shooterID] = 1
+		} else if time.Since(p.sprayStartTime[shooterID]) < 500*time.Millisecond {
+			p.currentSprayShots[shooterID]++
+			if p.currentSprayShots[shooterID] >= 3 {
+				stats.SprayShots++
+			}
+		} else {
+			p.sprayStartTime[shooterID] = time.Now()
+			p.currentSprayShots[shooterID] = 1
+		}
+
+		// Counter-strafing check
+		velocity := e.Shooter.Velocity()
+		speed := math.Sqrt(velocity.X*velocity.X + velocity.Y*velocity.Y + velocity.Z*velocity.Z)
+		if speed < 30 {
+			stats.CounterStrafedShots++
+		}
+	})
+
+	// Handle hits and damage
+	p.parser.RegisterEventHandler(func(e events.PlayerHurt) {
+		if e.Attacker == nil || e.Player == nil || e.Attacker.SteamID64 == 0 || e.Player.SteamID64 == 0 {
+			return
+		}
+
+		attackerID := e.Attacker.SteamID64
+		victimID := e.Player.SteamID64
+		stats := p.match.GetOrCreatePlayerStats(attackerID, e.Attacker.Name)
+
+		// Check spotted enemy hits
+		if spottedTime, exists := p.enemySpottedTime[attackerID][victimID]; exists {
+			if time.Since(spottedTime) < 2*time.Second {
+				stats.EnemySpottedHits++
+			}
+		}
+
+		// Track spray hits
+		if p.currentSprayShots[attackerID] >= 3 {
+			stats.SprayHits++
+		}
+
+		// First damage timing
+		if _, exists := p.firstDamageTime[attackerID]; !exists {
+			p.firstDamageTime[attackerID] = make(map[uint64]time.Time)
+		}
+		if _, exists := p.firstDamageTime[attackerID][victimID]; !exists {
+			if spottedTime, exists := p.enemySpottedTime[attackerID][victimID]; exists {
+				timeToDamage := time.Since(spottedTime).Seconds()
+				stats.TimeToFirstDamage = append(stats.TimeToFirstDamage, timeToDamage)
+				p.firstDamageTime[attackerID][victimID] = time.Now()
+			}
+		}
+
+		stats.TotalDamage += e.HealthDamage
+	})
+
+	// Handle kills and trades
+	p.parser.RegisterEventHandler(func(e events.Kill) {
+		if e.Killer == nil || e.Victim == nil || e.Killer.SteamID64 == 0 || e.Victim.SteamID64 == 0 {
+			return
+		}
+
+		// Check for trades
+		if p.lastKillTime != nil && time.Since(*p.lastKillTime) < 3*time.Second {
+			if p.lastKillVictim == e.Killer.SteamID64 {
+				victimStats := p.match.GetOrCreatePlayerStats(e.Victim.SteamID64, e.Victim.Name)
+				victimStats.TradedDeaths++
+			}
+		}
+	})
+
+	// Handle flash events
+	p.parser.RegisterEventHandler(func(e events.FlashExplode) {
+		if e.Thrower == nil || e.Thrower.SteamID64 == 0 {
+			return
+		}
+
+		stats := p.match.GetOrCreatePlayerStats(e.Thrower.SteamID64, e.Thrower.Name)
+
+		enemiesFlashed := 0
+		totalBlindDuration := 0.0
+
+		for _, player := range p.parser.GameState().Participants().Playing() {
+			if player.Team != e.Thrower.Team && player.FlashDurationTime() > 0 {
+				enemiesFlashed++
+				totalBlindDuration += player.FlashDurationTime().Seconds()
+			}
+		}
+
+		stats.UtilityStats.EnemiesFlashed += enemiesFlashed
+		stats.UtilityStats.TotalBlindDuration += totalBlindDuration
+	})
+
+	// Register existing handlers
 	p.parser.RegisterEventHandler(func(e events.Kill) {
 		p.handleKill(e, debug)
 		p.handleSprayControl(e)
 		p.handlePeekTracking(e)
 	})
+
 	p.parser.RegisterEventHandler(func(e events.WeaponFire) {
 		p.handleWeaponFire(e)
 		p.handleFirstBulletAccuracy(e)
 	})
+
 	p.parser.RegisterEventHandler(p.handlePlayerHurt)
+
 	p.parser.RegisterEventHandler(func(e events.RoundStart) {
 		p.handleRoundStart(e)
 		p.handleEquipmentTracking(e)
 	})
+
 	p.parser.RegisterEventHandler(p.handleRoundEnd)
 
 	p.parser.RegisterEventHandler(func(e events.GrenadeEvent) {
 		if e.Thrower != nil {
 			stats := p.match.GetOrCreatePlayerStats(e.Thrower.SteamID64, e.Thrower.Name)
 			if e.Grenade.Type == common.EqFlash {
-				stats.FlashesThrown++
+				stats.UtilityStats.FlashesThrown++
 			} else if e.Grenade.Type == common.EqSmoke {
-				stats.SmokesThrown++
+				stats.UtilityStats.SmokesThrown++
 			}
-		}
-	})
-
-	p.parser.RegisterEventHandler(func(e events.FlashExplode) {
-		if e.Thrower != nil {
-			stats := p.match.GetOrCreatePlayerStats(e.Thrower.SteamID64, e.Thrower.Name)
-			var flashedCount int
-			for _, player := range p.parser.GameState().Participants().Playing() {
-				if player.FlashDurationTime() > 0 {
-					flashedCount++
-				}
-			}
-			stats.EnemiesFlashed += flashedCount
 		}
 	})
 }
@@ -427,4 +568,20 @@ func isUtilityWeapon(weapon string) bool {
 		"Incendiary":    true,
 	}
 	return utilities[weapon]
+}
+
+func isVisible(observer, target *common.Player) bool {
+	observerPos := observer.Position()
+	targetPos := target.Position()
+
+	// Create a ray from observer to target
+	ray := r3.Vector{
+		X: targetPos.X - observerPos.X,
+		Y: targetPos.Y - observerPos.Y,
+		Z: targetPos.Z - observerPos.Z,
+	}
+
+	// Simple line of sight check
+	maxDistance := math.Sqrt(ray.X*ray.X + ray.Y*ray.Y + ray.Z*ray.Z)
+	return maxDistance < 1000 // Arbitrary visibility range
 }
