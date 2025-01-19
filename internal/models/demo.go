@@ -4,6 +4,7 @@ type Match struct {
 	MapName     string
 	TickRate    float64
 	Events      []Event
+	Date        string
 	PlayerStats map[uint64]*PlayerStats // SteamID64 -> Stats
 }
 

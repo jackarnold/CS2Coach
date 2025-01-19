@@ -10,6 +10,7 @@ import (
 	dem "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs"
 	common "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/common"
 	events "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/events"
+	msgs2 "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/msgs2"
 	"github.com/richardkiene/CS2Coach/internal/models"
 )
 
@@ -48,15 +49,8 @@ func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
 	p.parser = dem.NewParser(f)
 	defer p.parser.Close()
 
+	p.match = models.NewMatch()
 	p.registerEventHandlers(debug)
-
-	header, err := p.parser.ParseHeader()
-	if err != nil {
-		return nil, err
-	}
-
-	p.match.MapName = header.MapName
-	p.match.TickRate = p.parser.TickRate()
 
 	p.parser.RegisterEventHandler(func(e events.MatchStart) {
 		for _, player := range p.parser.GameState().Participants().Playing() {
@@ -124,12 +118,29 @@ func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse error: %v", err)
 	}
-	fmt.Printf("Finished parsing. Found %d events\n", len(p.match.Events))
 
+	if p.match.MapName == "" {
+		p.match.MapName = "Unknown Map"
+		if debug {
+			fmt.Println("Warning: Could not determine map name")
+		}
+	}
+
+	fmt.Printf("Finished parsing. Found %d events\n", len(p.match.Events))
 	return p.match, nil
+
 }
 
 func (p *Parser) registerEventHandlers(debug bool) {
+	// Register server info handler for map name and basic details
+	p.parser.RegisterNetMessageHandler(func(msg *msgs2.CSVCMsg_ServerInfo) {
+		p.match.MapName = msg.GetMapName()
+		//p.match.Date = msg.GetMapName()
+		if debug {
+			fmt.Printf("Map name from server info: %s\n", *msg.MapName)
+		}
+	})
+
 	// Handle spotted enemies
 	p.parser.RegisterEventHandler(func(e events.FrameDone) {
 		for _, player := range p.parser.GameState().Participants().Playing() {
@@ -332,12 +343,16 @@ func (p *Parser) handleKill(e events.Kill, debug bool) {
 	}
 
 	now := time.Now()
-	if p.lastKillTime != nil && now.Sub(*p.lastKillTime).Seconds() <= 3.0 {
-		killerStats.TradeKills++
-		if p.lastKillKiller != nil {
-			p.lastKillKiller.TimesTraded++
+
+	// Trade kill check
+	if p.lastKillTime != nil &&
+		now.Sub(*p.lastKillTime).Seconds() <= 2.5 && // Trade window
+		e.Killer.Team != e.Victim.Team {
+		if e.Victim.SteamID64 == p.lastKillKiller.SteamID {
+			killerStats.TradeKills++
 		}
 	}
+
 	p.lastKillTime = &now
 	p.lastKillVictim = victimStats.SteamID
 	p.lastKillKiller = killerStats
@@ -399,6 +414,7 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 
 	stats := p.match.GetOrCreatePlayerStats(e.Attacker.SteamID64, e.Attacker.Name)
 	stats.HitsTotal++
+	stats.TotalDamage += e.HealthDamage // Ensure this is being set
 
 	weaponStats := stats.GetOrCreateWeaponStats(e.Weapon.String())
 	weaponStats.Hits++

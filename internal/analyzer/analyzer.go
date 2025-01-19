@@ -75,7 +75,7 @@ func (a *Analyzer) AnalyzeMatch(match *models.Match, playerName string, steamID 
 func (a *Analyzer) countRounds(events []models.Event) int {
 	roundCount := 0
 	for _, event := range events {
-		if event.Type == "round_start" {
+		if event.Type == "round_end" { // Change from round_start to round_end
 			roundCount++
 		}
 	}

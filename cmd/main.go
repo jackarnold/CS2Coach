@@ -78,7 +78,7 @@ func handleAnalyze(demoPath, playerName, steamID string, debug, verbose bool) {
 	}
 
 	// Display Leetify metrics and score
-	displayLeetifyMetrics(stats, verbose)
+	displayLeetifyMetrics(stats, match, verbose)
 
 	c := coach.NewCoach()
 	advice, err := c.GetAdvice(stats)
@@ -90,7 +90,7 @@ func handleAnalyze(demoPath, playerName, steamID string, debug, verbose bool) {
 	fmt.Println(advice)
 }
 
-func displayLeetifyMetrics(stats *models.AnalyzedStats, verbose bool) {
+func displayLeetifyMetrics(stats *models.AnalyzedStats, match *models.Match, verbose bool) {
 	// Calculate all metrics
 	aimMetrics := analyzer.CalculateAimScore(&stats.BasicStats)
 	positioningMetrics := analyzer.CalculatePositioningScore(&stats.BasicStats)
@@ -104,6 +104,7 @@ func displayLeetifyMetrics(stats *models.AnalyzedStats, verbose bool) {
 
 	// Display metrics
 	fmt.Printf("\nLeetify Analysis:\n")
+	fmt.Printf("\nMap: %s\n", match.MapName)
 	fmt.Printf("Overall Rating: %.2f\n", impactScore)
 
 	// Combat Metrics
@@ -230,6 +231,9 @@ func handlePredict(demoPath, playerName, steamID string, debug bool, verbose boo
 	if err != nil {
 		log.Fatalf("Error making prediction: %v", err)
 	}
+
+	// Display metrics with map info
+	displayLeetifyMetrics(stats, match, verbose)
 
 	fmt.Printf("\nPrediction Results:\n")
 	fmt.Printf("Player Impact: %s (%.2f%% confidence)\n",

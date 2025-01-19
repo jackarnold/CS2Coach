@@ -6,12 +6,13 @@ func CalculateLeetifyMetrics(stats *models.PlayerStats, roundCount int) *models.
 	metrics := &models.LeetifyMetrics{}
 
 	// Accuracy metrics
-	if stats.EnemySpottedShots > 0 {
-		metrics.AccuracyEnemySpotted = float64(stats.EnemySpottedHits) / float64(stats.EnemySpottedShots) * 100
+	if stats.ShotsTotal > 0 {
+		metrics.AccuracyEnemySpotted = float64(stats.HitsTotal) / float64(stats.ShotsTotal) * 100
+		metrics.CounterStrafing = float64(stats.CounterStrafedShots) / float64(stats.ShotsTotal) * 100
 	}
 
-	if stats.HitsTotal > 0 {
-		metrics.HeadshotAccuracy = float64(stats.Headshots) / float64(stats.HitsTotal) * 100
+	if stats.Kills > 0 {
+		metrics.HeadshotAccuracy = float64(stats.Headshots) / float64(stats.Kills) * 100
 	}
 
 	if stats.ShotsTotal > 0 {
@@ -31,9 +32,12 @@ func CalculateLeetifyMetrics(stats *models.PlayerStats, roundCount int) *models.
 		metrics.CrosshairPlacement = sum / float64(len(stats.CrosshairAdjustments))
 	}
 
-	// ADR and Time to Damage
-	metrics.ADR = float64(stats.TotalDamage) / float64(roundCount)
+	// ADR calculation
+	if roundCount > 0 {
+		metrics.ADR = float64(stats.TotalDamage) / float64(roundCount)
+	}
 
+	// Time to Damage
 	if len(stats.TimeToFirstDamage) > 0 {
 		sum := 0.0
 		for _, time := range stats.TimeToFirstDamage {
@@ -52,8 +56,7 @@ func CalculateLeetifyMetrics(stats *models.PlayerStats, roundCount int) *models.
 	}
 
 	// Utility metrics per game
-	gamesPlayed := float64(roundCount) / 30.0 // Approximate games from rounds
-	metrics.UtilityMetrics = CalculateUtilityMetrics(&stats.UtilityStats, gamesPlayed)
+	metrics.UtilityMetrics = CalculateUtilityMetrics(&stats.UtilityStats, float64(roundCount)/30.0)
 
 	// Calculate overall Leetify Rating
 	metrics.LeetifyRating = calculateLeetifyRating(stats, metrics)
