@@ -2,64 +2,101 @@ package analyzer
 
 import "github.com/richardkiene/CS2Coach/internal/models"
 
+func calculateHLTVRating(stats *models.PlayerStats, roundCount int) float64 {
+	// HLTV 2.0 Rating calculation
+	killRating := float64(stats.Kills) / float64(roundCount) / 0.679
+	survivalRating := float64(roundCount-stats.Deaths) / float64(roundCount) / 0.317
+
+	// Rounds with multiple kills
+	multiKillRounds := stats.TwoKills + stats.ThreeKills + stats.FourKills + stats.FiveKills
+	roundsWithMultipleKillsRating := float64(multiKillRounds) / float64(roundCount) / 1.277
+
+	return (killRating + 0.7*survivalRating + roundsWithMultipleKillsRating) / 2.7
+}
+
 func CalculateLeetifyMetrics(stats *models.PlayerStats, roundCount int) *models.LeetifyMetrics {
 	metrics := &models.LeetifyMetrics{}
+	games := float64(roundCount) / 30.0 // Normalize to per-game metrics
+
+	// Core metrics
+	metrics.ADR = float64(stats.TotalDamage) / float64(roundCount)
+
+	// HLTV Rating
+	killRating := float64(stats.Kills) / float64(roundCount) / 0.679
+	survivalRating := float64(roundCount-stats.Deaths) / float64(roundCount) / 0.317
+	multiKillRounds := stats.TwoKills + stats.ThreeKills + stats.FourKills + stats.FiveKills
+	roundsWithMultiKills := float64(multiKillRounds) / float64(roundCount) / 1.277
+	metrics.HLTV = (killRating + 0.7*survivalRating + roundsWithMultiKills) / 2.7
 
 	// Accuracy metrics
 	if stats.ShotsTotal > 0 {
-		metrics.AccuracyEnemySpotted = float64(stats.HitsTotal) / float64(stats.ShotsTotal) * 100
-		metrics.CounterStrafing = float64(stats.CounterStrafedShots) / float64(stats.ShotsTotal) * 100
+		metrics.AccuracyAll = float64(stats.HitsTotal) / float64(stats.ShotsTotal) * 100
+		if stats.EnemySpottedShots > 0 {
+			metrics.SpottedAccuracy = float64(stats.EnemySpottedHits) / float64(stats.EnemySpottedShots) * 100
+		}
+	}
+
+	if stats.HitsTotal > 0 {
+		metrics.HeadAccuracy = float64(stats.Headshots) / float64(stats.HitsTotal) * 100
 	}
 
 	if stats.Kills > 0 {
-		metrics.HeadshotAccuracy = float64(stats.Headshots) / float64(stats.Kills) * 100
+		metrics.HeadshotKillPercentage = float64(stats.Headshots) / float64(stats.Kills) * 100
 	}
 
-	if stats.ShotsTotal > 0 {
-		metrics.CounterStrafing = float64(stats.CounterStrafedShots) / float64(stats.ShotsTotal) * 100
-	}
-
-	if stats.SprayShots > 0 {
-		metrics.SprayAccuracy = float64(stats.SprayHits) / float64(stats.SprayShots) * 100
-	}
-
-	// Average crosshair placement
-	if len(stats.CrosshairAdjustments) > 0 {
-		sum := 0.0
-		for _, adj := range stats.CrosshairAdjustments {
-			sum += adj
-		}
-		metrics.CrosshairPlacement = sum / float64(len(stats.CrosshairAdjustments))
-	}
-
-	// ADR calculation
-	if roundCount > 0 {
-		metrics.ADR = float64(stats.TotalDamage) / float64(roundCount)
-	}
-
-	// Time to Damage
+	// Time to damage
 	if len(stats.TimeToFirstDamage) > 0 {
 		sum := 0.0
 		for _, time := range stats.TimeToFirstDamage {
 			sum += time
 		}
-		metrics.TimeToFirstDamage = sum / float64(len(stats.TimeToFirstDamage))
+		metrics.TimeToFirstDamage = (sum / float64(len(stats.TimeToFirstDamage))) * 1000 // Convert to ms
 	}
 
 	// Trade metrics
-	if stats.Kills > 0 {
-		metrics.TradeKillPercentage = float64(stats.TradeKills) / float64(stats.Kills) * 100
+	if stats.TradeKillOpportunities > 0 {
+		metrics.TradeKillAttemptRate = float64(stats.TradeKillAttempts) / float64(stats.TradeKillOpportunities) * 100
+	}
+	if stats.TradeKillAttempts > 0 {
+		metrics.TradeKillSuccessRate = float64(stats.TradeKills) / float64(stats.TradeKillAttempts) * 100
+	}
+	if stats.TradedDeathOpportunities > 0 {
+		metrics.TradedDeathAttemptRate = float64(stats.TradedDeathAttempts) / float64(stats.TradedDeathOpportunities) * 100
+	}
+	if stats.TradedDeathAttempts > 0 {
+		metrics.TradedDeathSuccessRate = float64(stats.TradedDeaths) / float64(stats.TradedDeathAttempts) * 100
 	}
 
-	if stats.Deaths > 0 {
-		metrics.TradedDeathPercentage = float64(stats.TradedDeaths) / float64(stats.Deaths) * 100
+	// Utility metrics
+	if roundCount > 0 {
+		metrics.AvgHEDamage = float64(stats.UtilityStats.HEDamage) / float64(roundCount)
+		metrics.AvgTeamHEDamage = float64(stats.TeamUtilityDamage) / float64(roundCount)
+		metrics.AvgUnusedUtilityValue = float64(stats.UnusedUtilityValue) / float64(roundCount)
 	}
 
-	// Utility metrics per game
-	metrics.UtilityMetrics = CalculateUtilityMetrics(&stats.UtilityStats, float64(roundCount)/30.0)
+	metrics.UtilityMetrics = CalculateUtilityMetrics(&stats.UtilityStats, games)
 
-	// Calculate overall Leetify Rating
-	metrics.LeetifyRating = calculateLeetifyRating(stats, metrics)
+	// Multi-kill tracking
+	metrics.MultiKills = map[string]int{
+		"two":   stats.TwoKills,
+		"three": stats.ThreeKills,
+		"four":  stats.FourKills,
+		"five":  stats.FiveKills,
+	}
+
+	// Calculate Leetify Rating (-10 to +10 scale)
+	aimScore := (metrics.HeadshotKillPercentage / 100 * 0.3) +
+		(metrics.AccuracyAll / 100 * 0.3) +
+		(metrics.SpottedAccuracy / 100 * 0.4)
+
+	utilityScore := (float64(stats.FlashAssists) / float64(roundCount) * 0.4) +
+		(metrics.AvgHEDamage / 30 * 0.3) +
+		(metrics.UtilityMetrics.EnemiesFlashedPerGame / 3 * 0.3)
+
+	survivalScore := float64(stats.RoundsSurvived) / float64(roundCount)
+	impactScore := float64(stats.Kills) / float64(stats.Deaths+1)
+
+	metrics.LeetifyRating = ((aimScore*0.4+utilityScore*0.3+survivalScore*0.15+impactScore*0.15)-0.5)*20 - 10
 
 	return metrics
 }
@@ -80,14 +117,24 @@ func CalculateUtilityMetrics(stats *models.UtilityStats, games float64) models.U
 }
 
 func calculateLeetifyRating(stats *models.PlayerStats, metrics *models.LeetifyMetrics) float64 {
-	// Base rating from KDA
-	rating := (float64(stats.Kills)*1.0 + float64(stats.Assists)*0.7) / float64(stats.Deaths+1) * 100
+	// Base rating components
+	aimRating := (metrics.HeadshotKillPercentage / 100 * 0.3) +
+		(metrics.AccuracyAll / 100 * 0.3) +
+		(metrics.SprayAccuracy / 100 * 0.2) +
+		(metrics.CounterStrafing / 100 * 0.2)
 
-	// Impact multipliers
-	rating *= (1 + metrics.ADR/300.0)                   // Damage impact
-	rating *= (1 + metrics.HeadshotAccuracy/200.0)      // Aim impact
-	rating *= (1 + float64(stats.FlashAssists)/50.0)    // Utility impact
-	rating *= (1 + metrics.TradedDeathPercentage/200.0) // Trading impact
+	utilityRating := (float64(stats.FlashAssists) * 0.4) +
+		(metrics.AvgHEDamage / 30 * 0.3) +
+		(metrics.UtilityMetrics.EnemiesFlashedPerGame / 3 * 0.3)
+
+	positioningRating := (metrics.RoundsSurvivedPercentage / 100 * 0.4) +
+		(metrics.TradeKillSuccessRate / 100 * 0.3) +
+		(metrics.TradedDeathSuccessRate / 100 * 0.3)
+
+	// Final rating calculation (-10 to +10 scale like Leetify)
+	rating := ((aimRating*0.4)+
+		(utilityRating*0.3)+
+		(positioningRating*0.3)-0.5)*20 - 10
 
 	return rating
 }

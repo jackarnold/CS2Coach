@@ -43,6 +43,7 @@ func (m *Match) GetOrCreatePlayerStats(steamID uint64, name string) *PlayerStats
 		SurvivalByPhase: make(map[string]int),
 		MapAreaKills:    make(map[string]int),
 		MapAreaDeaths:   make(map[string]int),
+		Velocity:        make(map[string]float64),
 	}
 
 	if steamID != 0 {

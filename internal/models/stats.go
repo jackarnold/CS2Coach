@@ -22,6 +22,7 @@ type PlayerStats struct {
 	SurvivalByPhase map[string]int // early, mid, late, clutch
 	MapAreaKills    map[string]int
 	MapAreaDeaths   map[string]int
+	Velocity        map[string]float64
 
 	// Aim metrics
 	FirstBulletHits   int
@@ -70,14 +71,28 @@ type PlayerStats struct {
 	EnemySpottedShots int
 	EnemySpottedHits  int
 
-	CounterStrafedShots  int
-	SprayShots           int
-	SprayHits            int
-	CrosshairAdjustments []float64
-	TotalDamage          int
-	TimeToFirstDamage    []float64
-	TradedDeaths         int
-	UtilityStats         UtilityStats
+	CounterStrafedShots      int
+	SprayShots               int
+	SprayHits                int
+	CrosshairAdjustments     []float64
+	TotalDamage              int
+	TimeToFirstDamage        []float64
+	TradedDeaths             int
+	UtilityStats             UtilityStats
+	TwoKills                 int
+	ThreeKills               int
+	FourKills                int
+	FiveKills                int
+	TradeKillOpportunities   int
+	TradeKillAttempts        int
+	TradedDeathOpportunities int
+	TradedDeathAttempts      int
+	CTSideKills              map[string]int
+	TSideKills               map[string]int
+	UnusedUtilityValue       int
+	TeamUtilityDamage        int
+	CTSideEntries            map[string]int
+	TSideEntries             map[string]int
 }
 
 type UtilityStats struct {
@@ -93,18 +108,41 @@ type UtilityStats struct {
 }
 
 type LeetifyMetrics struct {
-	LeetifyRating         float64
-	AccuracyEnemySpotted  float64
-	HeadshotAccuracy      float64
-	CounterStrafing       float64
-	SprayAccuracy         float64
-	CrosshairPlacement    float64
-	ADR                   float64
-	TimeToFirstDamage     float64
-	SpottedAccuracy       float64
-	TradeKillPercentage   float64
-	TradedDeathPercentage float64
+	// Core ratings
+	LeetifyRating float64
+	HLTV          float64
+
+	// Aim metrics
+	AccuracyAll            float64
+	SpottedAccuracy        float64
+	HeadAccuracy           float64
+	HeadshotKillPercentage float64
+	SprayAccuracy          float64
+	CounterStrafing        float64
+	CrosshairPlacement     float64
+	TimeToFirstDamage      float64
+
+	// Damage metrics
+	ADR           float64
+	DamagePerShot float64
+
+	// Multi-kill metrics
+	MultiKills map[string]int
+
+	// Trade metrics
+	TradeKillAttemptRate   float64
+	TradeKillSuccessRate   float64
+	TradedDeathAttemptRate float64
+	TradedDeathSuccessRate float64
+
+	// Utility metrics
 	UtilityMetrics        UtilityMetrics
+	AvgUnusedUtilityValue float64
+	AvgHEDamage           float64
+	AvgTeamHEDamage       float64
+
+	// Round metrics
+	RoundsSurvivedPercentage float64
 }
 
 type UtilityMetrics struct {
@@ -114,9 +152,9 @@ type UtilityMetrics struct {
 	MolotovsPerGame           float64
 	SmokesPerGame             float64
 	EnemiesFlashedPerGame     float64
+	TeammatesFlashedPerGame   float64
 	FlashAssistsPerGame       float64
 	AvgBlindDuration          float64
-	TeammatesFlashedPerGame   float64
 	TotalBlindDurationPerGame float64
 }
 

@@ -64,7 +64,7 @@ func handleAnalyze(demoPath, playerName, steamID string, debug, verbose bool) {
 		log.Fatal("Please provide either player name or Steam ID")
 	}
 
-	p := parser.NewParser()
+	p := parser.NewParser(debug)
 	fmt.Printf("Parsing demo file: %s\n", demoPath)
 	match, err := p.ParseDemo(demoPath, debug)
 	if err != nil {
@@ -91,48 +91,69 @@ func handleAnalyze(demoPath, playerName, steamID string, debug, verbose bool) {
 }
 
 func displayLeetifyMetrics(stats *models.AnalyzedStats, match *models.Match, verbose bool) {
-	// Calculate all metrics
-	aimMetrics := analyzer.CalculateAimScore(&stats.BasicStats)
-	positioningMetrics := analyzer.CalculatePositioningScore(&stats.BasicStats)
-	utilityMetrics := analyzer.CalculateUtilityScore(&stats.BasicStats)
-	decisionMetrics := analyzer.CalculateDecisionScore(&stats.BasicStats)
-	impactScore := analyzer.CalculateImpactScore(&stats.BasicStats)
-
-	// Calculate Leetify metrics
+	// Calculate metrics
 	roundCount := len(stats.BasicStats.SurvivalByPhase)
 	leetifyMetrics := analyzer.CalculateLeetifyMetrics(&stats.BasicStats, roundCount)
 
-	// Display metrics
 	fmt.Printf("\nLeetify Analysis:\n")
 	fmt.Printf("\nMap: %s\n", match.MapName)
-	fmt.Printf("Overall Rating: %.2f\n", impactScore)
+
+	// Overview
+	fmt.Printf("\nOverview Metrics:\n")
+	fmt.Printf("Leetify Rating: %.2f\n", leetifyMetrics.LeetifyRating)
+	fmt.Printf("HLTV Rating: %.2f\n", leetifyMetrics.HLTV)
+	fmt.Printf("ADR: %.1f\n", leetifyMetrics.ADR)
 
 	// Combat Metrics
 	fmt.Printf("\nCombat Performance:\n")
 	fmt.Printf("- K/D/A: %d/%d/%d\n", stats.BasicStats.Kills, stats.BasicStats.Deaths, stats.BasicStats.Assists)
-	fmt.Printf("- ADR: %.1f\n", leetifyMetrics.ADR)
-	fmt.Printf("- Headshot %%: %.1f%%\n", leetifyMetrics.HeadshotAccuracy)
-	fmt.Printf("- Enemy Spotted Accuracy: %.1f%%\n", leetifyMetrics.AccuracyEnemySpotted)
-	fmt.Printf("- Spray Control: %.1f%%\n", leetifyMetrics.SprayAccuracy)
-	fmt.Printf("- Counter-Strafe Accuracy: %.1f%%\n", leetifyMetrics.CounterStrafing)
-	fmt.Printf("- Time to Damage: %.3fs\n", leetifyMetrics.TimeToFirstDamage)
+	fmt.Printf("- Accuracy (All): %.1f%%\n", leetifyMetrics.AccuracyAll)
+	fmt.Printf("- Spotted Accuracy: %.1f%%\n", leetifyMetrics.SpottedAccuracy)
+	fmt.Printf("- Head Accuracy: %.1f%%\n", leetifyMetrics.HeadAccuracy)
+	fmt.Printf("- Headshot Kill %%: %.1f%%\n", leetifyMetrics.HeadshotKillPercentage)
+	fmt.Printf("- Spray Accuracy: %.1f%%\n", leetifyMetrics.SprayAccuracy)
+	fmt.Printf("- Counter-Strafing: %.1f%%\n", leetifyMetrics.CounterStrafing)
+	fmt.Printf("- Time to Damage: %.0fms\n", leetifyMetrics.TimeToFirstDamage)
+	fmt.Printf("- Crosshair Placement: %.2f°\n", leetifyMetrics.CrosshairPlacement)
 
 	// Trade Metrics
 	fmt.Printf("\nTrade Statistics:\n")
-	fmt.Printf("- Trade Kills: %d (%.1f%%)\n", stats.BasicStats.TradeKills, leetifyMetrics.TradeKillPercentage)
-	fmt.Printf("- Times Traded: %d (%.1f%%)\n", stats.BasicStats.TradedDeaths, leetifyMetrics.TradedDeathPercentage)
+	fmt.Printf("- Trade Kill Attempts: %.1f%% (%d/%d)\n",
+		leetifyMetrics.TradeKillAttemptRate,
+		stats.BasicStats.TradeKillAttempts,
+		stats.BasicStats.TradeKillOpportunities)
+	fmt.Printf("- Trade Kill Success: %.1f%% (%d/%d)\n",
+		leetifyMetrics.TradeKillSuccessRate,
+		stats.BasicStats.TradeKills,
+		stats.BasicStats.TradeKillAttempts)
+	fmt.Printf("- Traded Death Attempts: %.1f%% (%d/%d)\n",
+		leetifyMetrics.TradedDeathAttemptRate,
+		stats.BasicStats.TradedDeathAttempts,
+		stats.BasicStats.TradedDeathOpportunities)
+	fmt.Printf("- Traded Death Success: %.1f%% (%d/%d)\n",
+		leetifyMetrics.TradedDeathSuccessRate,
+		stats.BasicStats.TradedDeaths,
+		stats.BasicStats.TradedDeathAttempts)
 
-	// Utility Usage
+	// Utility Metrics
 	fmt.Printf("\nUtility Impact:\n")
-	for metric, value := range utilityMetrics {
-		fmt.Printf("- %s: %.1f\n", metric, value)
-	}
-	fmt.Printf("Per Game Metrics:\n")
-	fmt.Printf("- Enemies Flashed: %.1f\n", leetifyMetrics.UtilityMetrics.EnemiesFlashedPerGame)
-	fmt.Printf("- HE Damage: %.1f\n", leetifyMetrics.UtilityMetrics.HEDamagePerGame)
-	fmt.Printf("- Flash Duration: %.1fs\n", leetifyMetrics.UtilityMetrics.AvgBlindDuration)
+	fmt.Printf("- Flash Assists: %.1f per game\n", leetifyMetrics.UtilityMetrics.FlashAssistsPerGame)
+	fmt.Printf("- Enemies Flashed: %.2f per game\n", leetifyMetrics.UtilityMetrics.EnemiesFlashedPerGame)
+	fmt.Printf("- Friends Flashed: %.2f per game\n", leetifyMetrics.UtilityMetrics.TeammatesFlashedPerGame)
+	fmt.Printf("- Avg Blind Duration: %.1fs\n", leetifyMetrics.UtilityMetrics.AvgBlindDuration)
+	fmt.Printf("- Avg HE Damage: %.2f\n", leetifyMetrics.AvgHEDamage)
+	fmt.Printf("- Avg HE Team Damage: %.2f\n", leetifyMetrics.AvgTeamHEDamage)
+	fmt.Printf("- Avg Unused Utility: $%.0f\n", leetifyMetrics.AvgUnusedUtilityValue)
 
 	if verbose {
+		// Multi-kill stats
+		fmt.Printf("\nMulti-kill Rounds:\n")
+		fmt.Printf("- Two Kills: %d\n", leetifyMetrics.MultiKills["two"])
+		fmt.Printf("- Three Kills: %d\n", leetifyMetrics.MultiKills["three"])
+		fmt.Printf("- Four Kills: %d\n", leetifyMetrics.MultiKills["four"])
+		fmt.Printf("- Five Kills: %d\n", leetifyMetrics.MultiKills["five"])
+
+		// Detailed weapon stats
 		fmt.Printf("\nDetailed Weapon Statistics:\n")
 		for weapon, stats := range stats.BasicStats.WeaponStats {
 			if stats.Shots > 0 {
@@ -141,22 +162,6 @@ func displayLeetifyMetrics(stats *models.AnalyzedStats, match *models.Match, ver
 				fmt.Printf("- %s: %d kills, %.1f%% accuracy, %.1f%% HS\n",
 					weapon, stats.Kills, accuracy, hsRate)
 			}
-		}
-
-		fmt.Printf("\nAdvanced Metrics:\n")
-		fmt.Printf("Aim Score Components:\n")
-		for metric, value := range aimMetrics {
-			fmt.Printf("- %s: %.1f\n", metric, value)
-		}
-
-		fmt.Printf("\nPositioning Score Components:\n")
-		for metric, value := range positioningMetrics {
-			fmt.Printf("- %s: %.1f\n", metric, value)
-		}
-
-		fmt.Printf("\nDecision Making Score Components:\n")
-		for metric, value := range decisionMetrics {
-			fmt.Printf("- %s: %.1f\n", metric, value)
 		}
 	}
 }
@@ -176,7 +181,7 @@ func handleTrain(demoDir, configPath string, debug bool, verbose bool) {
 	var matches []*models.Match
 	err = filepath.Walk(demoDir, func(path string, info os.FileInfo, err error) error {
 		if filepath.Ext(path) == ".dem" {
-			p := parser.NewParser()
+			p := parser.NewParser(debug)
 			match, err := p.ParseDemo(path, debug)
 			if err != nil {
 				fmt.Printf("Warning: Error parsing demo %s: %v\n", path, err)
@@ -208,7 +213,7 @@ func handlePredict(demoPath, playerName, steamID string, debug bool, verbose boo
 	}
 
 	// Parse demo
-	p := parser.NewParser()
+	p := parser.NewParser(debug)
 	match, err := p.ParseDemo(demoPath, debug)
 	if err != nil {
 		log.Fatalf("Error parsing demo: %v", err)
