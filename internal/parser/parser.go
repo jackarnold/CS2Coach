@@ -29,6 +29,7 @@ type Parser struct {
 	alivePlayersByTeam map[int]int
 	currentRoundKills  map[uint64]map[int]int
 	lastWeaponFireTime map[uint64]time.Time
+	angleHistory       map[uint64][]float32
 }
 
 func NewParser(debug bool) *Parser {
@@ -42,7 +43,22 @@ func NewParser(debug bool) *Parser {
 		enemySpottedTime:   make(map[uint64]map[uint64]time.Time),
 		firstDamageTime:    make(map[uint64]map[uint64]time.Time),
 		lastWeaponFireTime: make(map[uint64]time.Time),
+		angleHistory:       make(map[uint64][]float32),
 	}
+}
+
+func (p *Parser) GetOrCreatePlayerStats(steamID uint64, name string) *models.PlayerStats {
+	stats := p.match.GetOrCreatePlayerStats(steamID, name)
+	if stats.TimeToFirstDamage == nil {
+		stats.TimeToFirstDamage = make([]float64, 0)
+	}
+	if stats.CrosshairPlacement == nil {
+		stats.CrosshairPlacement = make([]float64, 0)
+	}
+	if stats.Velocity == nil {
+		stats.Velocity = make(map[string]float64)
+	}
+	return stats
 }
 
 func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
@@ -192,14 +208,6 @@ func (p *Parser) registerEventHandlers(debug bool) {
 	p.parser.RegisterEventHandler(p.handlePeekTracking)
 }
 
-func calculateHLTVRating(stats *models.PlayerStats, roundCount int) float64 {
-	killRating := float64(stats.Kills) / float64(roundCount) / 0.679
-	survivalRating := float64(roundCount-stats.Deaths) / float64(roundCount) / 0.317
-	roundsWithMultipleKillsRating := float64(stats.TwoKills+stats.ThreeKills+stats.FourKills+stats.FiveKills) / float64(roundCount) / 1.277
-
-	return (killRating + 0.7*survivalRating + roundsWithMultipleKillsRating) / 2.7
-}
-
 func getUtilityValue(grenadeType common.EquipmentType) int {
 	switch grenadeType {
 	case common.EqHE:
@@ -253,28 +261,36 @@ func (p *Parser) handleTrade(e events.Kill) {
 		return
 	}
 
-	// Check for trade opportunities
+	// Record trade opportunities and attempts
 	for _, player := range p.parser.GameState().Participants().Playing() {
 		if player.Team == e.Victim.Team && player.IsAlive() {
 			stats := p.match.GetOrCreatePlayerStats(player.SteamID64, player.Name)
 			stats.TradeKillOpportunities++
 
-			// Check if attempt was made (player fired at killer within 3 seconds)
 			if time.Since(p.lastWeaponFireTime[player.SteamID64]) <= 3*time.Second {
 				stats.TradeKillAttempts++
 			}
 		}
 	}
 
-	// Check if this kill was a trade (victim killed someone in last 3 seconds)
-	if p.lastKillTime != nil && time.Since(*p.lastKillTime) <= 3*time.Second {
-		if p.lastKillVictim == e.Killer.SteamID64 {
-			killerStats := p.match.GetOrCreatePlayerStats(e.Killer.SteamID64, e.Killer.Name)
-			killerStats.TradeKills++
+	// Record traded deaths
+	victim := p.match.GetOrCreatePlayerStats(e.Victim.SteamID64, e.Victim.Name)
+	victim.TradedDeathOpportunities++
+
+	if time.Since(p.lastWeaponFireTime[e.Victim.SteamID64]) <= 3*time.Second {
+		victim.TradedDeathAttempts++
+
+		// Check if the death was actually traded
+		if p.lastKillTime != nil && time.Since(*p.lastKillTime) <= 3*time.Second {
+			if p.lastKillVictim == e.Killer.SteamID64 {
+				victim.TradedDeaths++
+			}
 		}
 	}
 }
 
+// TODO: This function is being treated as utility stats only but I am fairly sure that's not all we should be tracking.
+// -- handlePlayerHurt also tracks this event and really these should be consolidated
 func (p *Parser) handleActivity(e events.PlayerHurt) {
 	if (!p.isLiveGameRound()) || e.Attacker == nil || e.Player == nil {
 		return
@@ -286,16 +302,13 @@ func (p *Parser) handleActivity(e events.PlayerHurt) {
 	case common.EqHE:
 		stats.UtilityStats.HEDamage += e.HealthDamage
 	case common.EqMolotov, common.EqIncendiary:
-		// Track molotov damage
 		if e.Attacker.Team == e.Player.Team {
 			stats.TeamUtilityDamage += e.HealthDamage
 		} else {
 			stats.UtilityStats.MolotovsThrown++
+			// TODO: track molly damage
 		}
 	}
-
-	// Track overall damage
-	stats.TotalDamage += e.HealthDamage
 }
 
 func (p *Parser) handleKill(e events.Kill) {
@@ -380,14 +393,32 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 	}
 
 	stats := p.match.GetOrCreatePlayerStats(e.Shooter.SteamID64, e.Shooter.Name)
+
+	if stats.Velocity == nil {
+		stats.Velocity = make(map[string]float64)
+	}
+	if stats.TimeToFirstDamage == nil {
+		stats.TimeToFirstDamage = make([]float64, 0)
+	}
+
 	stats.ShotsTotal++
 
 	// Track spotted shots
+	enemySpotted := false
 	for _, enemy := range p.parser.GameState().Participants().Playing() {
 		if enemy.Team != e.Shooter.Team && enemy.IsAlive() && isVisible(e.Shooter, enemy) {
-			stats.EnemySpottedShots++
+			enemySpotted = true
 			break
 		}
+	}
+
+	if enemySpotted {
+		stats.EnemySpottedShots++
+	}
+
+	// Track spray control
+	if p.currentSprayShots[e.Shooter.SteamID64] > 0 {
+		stats.SprayShots++
 	}
 
 	// Track counter-strafing
@@ -395,9 +426,7 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 	currentVel := magnitude(shooter.Velocity())
 	prevVel := stats.Velocity[shooter.Name]
 
-	// Check if we basically dropped from a higher velocity to near zero in a short timespan
-	// This is a naive approach:
-	if prevVel > 100 && currentVel < 30 {
+	if prevVel > 100 && currentVel < 20 {
 		stats.CounterStrafedShots++
 	}
 
@@ -405,40 +434,90 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 }
 
 func (p *Parser) isLiveGameRound() bool {
-	return !(p.parser.GameState().IsWarmupPeriod() || p.parser.GameState().IsFreezetimePeriod())
+	gs := p.parser.GameState()
+	roundNum := gs.TotalRoundsPlayed()
+
+	if gs.IsWarmupPeriod() || gs.IsFreezetimePeriod() || roundNum < 1 {
+		fmt.Printf("Round %d not live: warmup=%v freeze=%v\n",
+			roundNum, gs.IsWarmupPeriod(), gs.IsFreezetimePeriod())
+		return false
+	}
+	return true
 }
 
 func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
-	if (!p.isLiveGameRound()) || e.Attacker == nil || e.Player == nil || e.Attacker.SteamID64 == 0 || e.Player.SteamID64 == 0 {
+	if (!p.isLiveGameRound()) || e.Attacker == nil || e.Player == nil ||
+		e.Attacker.SteamID64 == 0 || e.Player.SteamID64 == 0 {
 		return
+	}
+
+	// Don't count friendly fire or self damage
+	if e.Attacker.Team == e.Player.Team || e.Attacker.SteamID64 == e.Player.SteamID64 {
+		return
+	}
+
+	// Don't count damage to dead players
+	if !e.Player.IsAlive() {
+		return
+	}
+
+	// Debug info
+	killerName := "unknown"
+	victimName := "unknown"
+	if e.Attacker != nil {
+		killerName = e.Attacker.Name
+	}
+	if e.Player != nil {
+		victimName = e.Player.Name
+	}
+
+	if killerName == "shmeeny" {
+		fmt.Printf("Damage Event:\n")
+		fmt.Printf("  Attacker: %s (Team: %v)\n", killerName, e.Attacker.Team)
+		fmt.Printf("  Victim: %s (Team: %v, Alive: %v)\n", victimName, e.Player.Team, e.Player.IsAlive())
+		fmt.Printf("  Damage: %d\n", min(e.HealthDamage, e.Player.Health()))
+		fmt.Printf("  Weapon: %v\n", e.Weapon.Type)
+		fmt.Printf("  Round State: Warmup=%v, Freeze=%v\n", p.parser.GameState().IsWarmupPeriod(), p.parser.GameState().IsFreezetimePeriod())
+		fmt.Printf("  Current Round: %d\n\n", p.parser.GameState().TotalRoundsPlayed())
 	}
 
 	stats := p.match.GetOrCreatePlayerStats(e.Attacker.SteamID64, e.Attacker.Name)
 	stats.HitsTotal++
-	stats.TotalDamage += e.HealthDamage
 
-	// Track first damage time
-	if _, exists := p.firstDamageTime[e.Attacker.SteamID64]; !exists {
-		p.firstDamageTime[e.Attacker.SteamID64] = make(map[uint64]time.Time)
+	// Count damage only if it's not utility (handled in handleActivity)
+	// Also exclude bomb damage
+	if e.Weapon.Type != common.EqHE &&
+		e.Weapon.Type != common.EqMolotov &&
+		e.Weapon.Type != common.EqIncendiary &&
+		e.Weapon.Type != common.EqSmoke &&
+		e.Weapon.Type != common.EqFlash &&
+		e.Weapon.Type != common.EqDecoy &&
+		e.Weapon.Type != common.EqBomb {
+		stats.TotalDamage += min(e.HealthDamage, e.Player.Health())
 	}
-	if _, recorded := p.firstDamageTime[e.Attacker.SteamID64][e.Player.SteamID64]; !recorded {
-		if spottedTime, wasSpotted := p.enemySpottedTime[e.Attacker.SteamID64][e.Player.SteamID64]; wasSpotted {
+
+	// Track spotted hits
+	if _, exists := p.enemySpottedTime[e.Attacker.SteamID64]; exists {
+		if _, spotted := p.enemySpottedTime[e.Attacker.SteamID64][e.Player.SteamID64]; spotted {
+			stats.EnemySpottedHits++
+		}
+	}
+
+	// Track spray hits
+	if p.currentSprayShots[e.Attacker.SteamID64] > 0 {
+		stats.SprayHits++
+	}
+
+	// Track time to damage
+	if spottedTime, wasSpotted := p.enemySpottedTime[e.Attacker.SteamID64][e.Player.SteamID64]; wasSpotted {
+		if _, alreadyDamaged := p.firstDamageTime[e.Attacker.SteamID64][e.Player.SteamID64]; !alreadyDamaged {
 			timeToHit := time.Since(spottedTime).Seconds()
 			stats.TimeToFirstDamage = append(stats.TimeToFirstDamage, timeToHit)
-		}
-		p.firstDamageTime[e.Attacker.SteamID64][e.Player.SteamID64] = time.Now()
-	}
 
-	// Utility damage tracking
-	switch e.Weapon.Type {
-	case common.EqHE:
-		stats.UtilityStats.HEDamage += e.HealthDamage
-		if e.Attacker.Team == e.Player.Team {
-			stats.TeamUtilityDamage += e.HealthDamage
-		}
-	case common.EqMolotov, common.EqIncendiary:
-		if e.Attacker.Team == e.Player.Team {
-			stats.TeamUtilityDamage += e.HealthDamage
+			if _, exists := p.firstDamageTime[e.Attacker.SteamID64]; !exists {
+				p.firstDamageTime[e.Attacker.SteamID64] = make(map[uint64]time.Time)
+			}
+			p.firstDamageTime[e.Attacker.SteamID64][e.Player.SteamID64] = time.Now()
 		}
 	}
 }
@@ -446,24 +525,38 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 func (p *Parser) handleRoundStart(e events.RoundStart) {
 	p.roundStartTime = time.Now()
 	p.alivePlayersByTeam = make(map[int]int)
+	p.currentRoundKills = make(map[uint64]map[int]int)         // Reset multi-kill tracking
+	p.sprayStartTime = make(map[uint64]time.Time)              // Reset spray tracking
+	p.currentSprayShots = make(map[uint64]int)                 // Reset spray shots
+	p.enemySpottedTime = make(map[uint64]map[uint64]time.Time) // Reset spotted time
+	p.firstDamageTime = make(map[uint64]map[uint64]time.Time)  // Reset damage time
+	p.lastWeaponFireTime = make(map[uint64]time.Time)          // Reset weapon fire time
 
+	// Reset all player damage counts
 	for _, player := range p.parser.GameState().Participants().Playing() {
 		if player.SteamID64 == 0 {
 			continue
 		}
 		stats := p.match.GetOrCreatePlayerStats(player.SteamID64, player.Name)
 		stats.IsAlive = true
+		//stats.TotalDamage = 0 // Reset damage at round start
 		p.alivePlayersByTeam[int(player.Team)]++
 
-		if stats.SurvivalByPhase == nil {
+		if p.parser.GameState().IsWarmupPeriod() {
+			stats.TotalDamage = 0 // this might be a hack
 			stats.SurvivalByPhase = make(map[string]int)
+			stats.SurvivalByPhase[player.Name] = 0
+		} else {
+			stats.SurvivalByPhase[player.Name]++
 		}
+
 	}
 
 	p.match.AddEvent(models.Event{
 		Type: "round_start",
 		Data: map[string]interface{}{
-			"timestamp": p.roundStartTime.Unix(),
+			"timestamp":    p.roundStartTime.Unix(),
+			"round_number": p.parser.GameState().TotalRoundsPlayed(),
 		},
 	})
 }
@@ -523,22 +616,6 @@ func isQuickPeek(killerPos, victimPos r3.Vector, killerAngle float32) bool {
 	angleDiff := math.Abs(float64(angle - killerAngle))
 
 	return angleDiff <= 45
-}
-
-func (p *Parser) handleEquipmentTracking(e events.RoundStart) {
-	if !p.isLiveGameRound() {
-		return
-	}
-
-	for _, player := range p.parser.GameState().Participants().Playing() {
-		if player.SteamID64 == 0 {
-			continue
-		}
-
-		stats := p.match.GetOrCreatePlayerStats(player.SteamID64, player.Name)
-		stats.EquipmentValue = int(player.EquipmentValueCurrent())
-		stats.MoneySpent += stats.EquipmentValue
-	}
 }
 
 type Point struct {

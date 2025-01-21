@@ -52,7 +52,7 @@ func (a *Analyzer) AnalyzeMatch(match *models.Match, playerName string, steamID 
 	analyzed.AdvancedStats["Accuracy"] = float64(targetStats.HitsTotal) / float64(targetStats.ShotsTotal) * 100
 	analyzed.AdvancedStats["OpeningDuelSuccess"] = float64(targetStats.OpeningDuelsWon) / float64(targetStats.OpeningDuels) * 100
 	analyzed.AdvancedStats["ClutchSuccess"] = float64(targetStats.ClutchesWon) / float64(targetStats.ClutchAttempts) * 100
-	analyzed.AdvancedStats["UtilityDamagePerRound"] = float64(targetStats.UtilityDamage) / float64(roundCount)
+	analyzed.AdvancedStats["UtilityDamagePerRound"] = float64(targetStats.UtilityStats.HEDamage) / float64(roundCount)
 
 	// Calculate enhanced metrics
 	analyzed.AdvancedStats["TradeEfficiency"] = float64(targetStats.TradeKills) / float64(targetStats.TimesTraded) * 100
@@ -74,10 +74,13 @@ func (a *Analyzer) AnalyzeMatch(match *models.Match, playerName string, steamID 
 
 func (a *Analyzer) countRounds(events []models.Event) int {
 	roundCount := 0
+	fmt.Println("\nCounting rounds:")
 	for _, event := range events {
-		if event.Type == "round_end" { // Change from round_start to round_end
+		fmt.Printf("Event type: %s\n", event.Type)
+		if event.Type == "round_end" {
 			roundCount++
 		}
 	}
+	fmt.Printf("Total round count: %d\n", roundCount)
 	return roundCount
 }

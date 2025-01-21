@@ -3,96 +3,76 @@ package models
 import "fmt"
 
 type PlayerStats struct {
-	Name            string
-	SteamID         uint64
-	Kills           int
-	Deaths          int
-	Assists         int
-	Headshots       int
-	ShotsTotal      int
-	HitsTotal       int
-	OpeningDuels    int
-	OpeningDuelsWon int
-	IsAlive         bool
-	Team            int
-
-	// Enhanced stats
-	TimesTraded     int
-	RoundsSurvived  int
-	SurvivalByPhase map[string]int // early, mid, late, clutch
-	MapAreaKills    map[string]int
-	MapAreaDeaths   map[string]int
-	Velocity        map[string]float64
+	Name       string
+	SteamID    uint64
+	Kills      int
+	Deaths     int
+	Assists    int
+	Headshots  int
+	ShotsTotal int
+	HitsTotal  int
+	IsAlive    bool
+	Team       int
 
 	// Aim metrics
-	FirstBulletHits   int
-	FirstBulletShots  int
-	FlickKills        int
-	SprayTransfers    int
-	PreFireKills      int
-	ReactionTimeTotal float64
-	ReactionTimeCount int
+	EnemySpottedShots   int
+	EnemySpottedHits    int
+	SprayShots          int
+	SprayHits           int
+	CounterStrafedShots int
+	TimeToFirstDamage   []float64
+	FirstBulletHits     int
+	FirstBulletShots    int
+	CrosshairPlacement  []float64
 
-	// Positioning metrics
-	CounterStrafeKills int
-	PeekKills          int
-	PeekDeaths         int
-	FlashAssists       int
-	SiteHolds          int
-	RotationKills      int
-
-	// Utility metrics
-	FlashesThrown  int
-	EnemiesFlashed int
-	SmokesThrown   int
-	MolotovDamage  int
-	UtilityDamage  int
-
-	// Decision making
-	ForceBuyKills  int
-	ForceBuyDeaths int
-	ClutchAttempts int
-	ClutchesWon    int
-	EntryAttempts  int
-	EntryKills     int
-	TradeKills     int
-	TradeDeaths    int
-	RetakeKills    int
-
-	// Economic tracking
-	MoneySpent     int
-	EquipmentValue int
-
-	// Enhanced weapon stats
-	WeaponStats   map[string]*WeaponStats
-	SprayPatterns map[string][]Point
-
-	// Leetify metrics
-	EnemySpottedShots int
-	EnemySpottedHits  int
-
-	CounterStrafedShots      int
-	SprayShots               int
-	SprayHits                int
-	CrosshairAdjustments     []float64
-	TotalDamage              int
-	TimeToFirstDamage        []float64
-	TradedDeaths             int
-	UtilityStats             UtilityStats
-	TwoKills                 int
-	ThreeKills               int
-	FourKills                int
-	FiveKills                int
+	// Trade metrics
+	TradeKills               int
 	TradeKillOpportunities   int
 	TradeKillAttempts        int
+	TradedDeaths             int
 	TradedDeathOpportunities int
 	TradedDeathAttempts      int
-	CTSideKills              map[string]int
-	TSideKills               map[string]int
-	UnusedUtilityValue       int
-	TeamUtilityDamage        int
-	CTSideEntries            map[string]int
-	TSideEntries             map[string]int
+	TimesTraded              int
+
+	// Round metrics
+	RoundsSurvived  int
+	SurvivalByPhase map[string]int
+	OpeningDuels    int
+	OpeningDuelsWon int
+	ClutchAttempts  int
+	ClutchesWon     int
+
+	// Multi-kill tracking
+	TwoKills   int
+	ThreeKills int
+	FourKills  int
+	FiveKills  int
+
+	// Utility metrics
+	UtilityStats       UtilityStats
+	UnusedUtilityValue int
+	TeamUtilityDamage  int
+	TotalDamage        int
+
+	// Movement tracking
+	Velocity map[string]float64
+
+	WeaponStats       map[string]*WeaponStats // Missing field
+	MapAreaKills      map[string]int          // Missing field
+	MapAreaDeaths     map[string]int          // Missing field
+	FlashAssists      int                     // Missing field
+	PeekKills         int                     // Missing field
+	PeekDeaths        int                     // Missing field
+	SprayTransfers    int                     // Missing field
+	ReactionTimeTotal float64                 // Missing field
+	ReactionTimeCount int                     // Missing field
+	EquipmentValue    int                     // Missing field
+	MoneySpent        int                     // Missing field
+	SiteHolds         int                     // Missing field
+	EntryKills        int                     // Missing field
+	EntryAttempts     int                     // Missing field
+	ForceBuyKills     int                     // Missing field
+	ForceBuyDeaths    int                     // Missing field
 }
 
 type UtilityStats struct {
@@ -108,9 +88,9 @@ type UtilityStats struct {
 }
 
 type LeetifyMetrics struct {
-	// Core ratings
 	LeetifyRating float64
 	HLTV          float64
+	ADR           float64
 
 	// Aim metrics
 	AccuracyAll            float64
@@ -122,12 +102,11 @@ type LeetifyMetrics struct {
 	CrosshairPlacement     float64
 	TimeToFirstDamage      float64
 
-	// Damage metrics
-	ADR           float64
-	DamagePerShot float64
-
-	// Multi-kill metrics
-	MultiKills map[string]int
+	// Utility metrics
+	UtilityMetrics        UtilityMetrics
+	AvgHEDamage           float64
+	AvgTeamHEDamage       float64
+	AvgUnusedUtilityValue float64
 
 	// Trade metrics
 	TradeKillAttemptRate   float64
@@ -135,14 +114,7 @@ type LeetifyMetrics struct {
 	TradedDeathAttemptRate float64
 	TradedDeathSuccessRate float64
 
-	// Utility metrics
-	UtilityMetrics        UtilityMetrics
-	AvgUnusedUtilityValue float64
-	AvgHEDamage           float64
-	AvgTeamHEDamage       float64
-
-	// Round metrics
-	RoundsSurvivedPercentage float64
+	MultiKills map[string]int
 }
 
 type UtilityMetrics struct {
@@ -156,6 +128,18 @@ type UtilityMetrics struct {
 	FlashAssistsPerGame       float64
 	AvgBlindDuration          float64
 	TotalBlindDurationPerGame float64
+}
+
+func NewPlayerStats() *PlayerStats {
+	return &PlayerStats{
+		SurvivalByPhase:    make(map[string]int),
+		Velocity:           make(map[string]float64),
+		TimeToFirstDamage:  make([]float64, 0),
+		CrosshairPlacement: make([]float64, 0),
+		WeaponStats:        make(map[string]*WeaponStats),
+		MapAreaKills:       make(map[string]int),
+		MapAreaDeaths:      make(map[string]int),
+	}
 }
 
 func (ps *PlayerStats) Debug() string {

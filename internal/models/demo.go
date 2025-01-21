@@ -1,5 +1,7 @@
 package models
 
+import "time"
+
 type Match struct {
 	MapName     string
 	TickRate    float64
@@ -17,6 +19,7 @@ func NewMatch() *Match {
 	return &Match{
 		Events:      make([]Event, 0),
 		PlayerStats: make(map[uint64]*PlayerStats),
+		Date:        time.Now().Format("2006-01-02"),
 	}
 }
 

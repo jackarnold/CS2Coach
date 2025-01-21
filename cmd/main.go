@@ -78,7 +78,7 @@ func handleAnalyze(demoPath, playerName, steamID string, debug, verbose bool) {
 	}
 
 	// Display Leetify metrics and score
-	displayLeetifyMetrics(stats, match, verbose)
+	displayLeetifyMetrics(stats, match, playerName, verbose)
 
 	c := coach.NewCoach()
 	advice, err := c.GetAdvice(stats)
@@ -90,9 +90,10 @@ func handleAnalyze(demoPath, playerName, steamID string, debug, verbose bool) {
 	fmt.Println(advice)
 }
 
-func displayLeetifyMetrics(stats *models.AnalyzedStats, match *models.Match, verbose bool) {
+func displayLeetifyMetrics(stats *models.AnalyzedStats, match *models.Match, playerName string, verbose bool) {
 	// Calculate metrics
-	roundCount := len(stats.BasicStats.SurvivalByPhase)
+	roundCount := stats.BasicStats.SurvivalByPhase[playerName]
+	fmt.Println("stats.BasicStats.SurvivalByPhase[playerName]: " + fmt.Sprint(stats.BasicStats.SurvivalByPhase[playerName]))
 	leetifyMetrics := analyzer.CalculateLeetifyMetrics(&stats.BasicStats, roundCount)
 
 	fmt.Printf("\nLeetify Analysis:\n")
@@ -238,7 +239,7 @@ func handlePredict(demoPath, playerName, steamID string, debug bool, verbose boo
 	}
 
 	// Display metrics with map info
-	displayLeetifyMetrics(stats, match, verbose)
+	displayLeetifyMetrics(stats, match, playerName, verbose)
 
 	fmt.Printf("\nPrediction Results:\n")
 	fmt.Printf("Player Impact: %s (%.2f%% confidence)\n",
