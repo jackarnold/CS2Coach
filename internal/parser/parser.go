@@ -61,6 +61,7 @@ type Parser struct {
 	smokePositions     []r3.Vector          // Track active smoke positions
 	flashedPlayers     map[uint64]time.Time // Track flashed players
 	frameStorage       FrameStorage
+	bspChecker         *BSPVisibilityChecker
 }
 
 func NewParser(debug bool) *Parser {
@@ -119,6 +120,16 @@ func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
 		p.match.MapName = "Unknown Map"
 		if debug {
 			fmt.Println("Warning: Could not determine map name")
+		}
+	}
+
+	// Initialize BSP checker after getting map name
+	if p.match.MapName != "" {
+		bspChecker, err := NewBSPVisibilityChecker(p.match.MapName)
+		if err != nil && debug {
+			fmt.Printf("Warning: Failed to load BSP data: %v\n", err)
+		} else {
+			p.bspChecker = bspChecker
 		}
 	}
 
@@ -332,11 +343,12 @@ func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 }
 
 func (p *Parser) rayVisible(obs PlayerFrameData, tgt PlayerFrameData) bool {
-	// 1a) Check if there's a wall or static map geometry in between.
-	//    - demoinfocs doesn't give you the entire map geometry by default.
-	//      You might need a custom approach or an external nav mesh / BSP parser.
-	// 1b) Check if there's a wall in between? (Not implemented)
-	// 2) Check for smoke and flash impact
+	if p.bspChecker != nil {
+		if !p.bspChecker.IsVisible(obs.Position, tgt.Position) {
+			return false
+		}
+	}
+
 	if p.isLineInSmoke(obs.Position, tgt.Position) || p.isPlayerFlashed(obs.SteamID) {
 		return false
 	}
