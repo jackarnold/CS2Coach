@@ -14,6 +14,30 @@ import (
 	"github.com/richardkiene/CS2Coach/internal/models"
 )
 
+type PlayerFrameData struct {
+	SteamID    uint64
+	Position   r3.Vector
+	ViewAngleX float32
+	IsAlive    bool
+	// TODO: Possibly store bounding box corners for finer geometry checks
+}
+
+type FrameData struct {
+	Tick          int
+	Players       []PlayerFrameData
+	VisibilityMap map[uint64]map[uint64]bool // "is this observer -> target visible at this frame"
+}
+
+type FrameStorage struct {
+	frames []FrameData
+}
+
+type SpottedState struct {
+	LastSpottedTime time.Time
+	LastVisiblePos  r3.Vector
+	ViewAngle       float32
+}
+
 type Parser struct {
 	debug              bool
 	match              *models.Match
@@ -32,6 +56,11 @@ type Parser struct {
 	angleHistory       map[uint64][]float32
 	lastKnownHP        map[uint64]int // steamID -> current HP
 	lastDamageBy       map[uint64]map[uint64]int
+	visibilityCache    map[uint64]map[uint64]bool // Short-term cache for expensive visibility checks
+	lastUpdateTime     time.Time
+	smokePositions     []r3.Vector          // Track active smoke positions
+	flashedPlayers     map[uint64]time.Time // Track flashed players
+	frameStorage       FrameStorage
 }
 
 func NewParser(debug bool) *Parser {
@@ -48,6 +77,8 @@ func NewParser(debug bool) *Parser {
 		lastWeaponFireTime: make(map[uint64]time.Time),
 		angleHistory:       make(map[uint64][]float32),
 		lastKnownHP:        make(map[uint64]int),
+		visibilityCache:    make(map[uint64]map[uint64]bool),
+		flashedPlayers:     make(map[uint64]time.Time),
 	}
 }
 
@@ -112,6 +143,19 @@ func (p *Parser) registerEventHandlers(debug bool) {
 	p.parser.RegisterEventHandler(p.handleActivity)
 	p.parser.RegisterEventHandler(p.handlePeekTracking)
 	p.parser.RegisterEventHandler(p.handleFrameDone)
+	p.parser.RegisterEventHandler(p.handleFlashEvent)
+}
+
+func (p *Parser) handleFlashEvent(e events.PlayerFlashed) {
+	if (!p.isLiveGameRound()) || e.Player == nil {
+		return
+	}
+
+	oldEnd, had := p.flashedPlayers[e.Player.SteamID64]
+	newEnd := time.Now().Add(e.Player.FlashDurationTime())
+	if !had || newEnd.After(oldEnd) {
+		p.flashedPlayers[e.Player.SteamID64] = newEnd
+	}
 }
 
 func (p *Parser) handleServerInfo(msg *msgs2.CSVCMsg_ServerInfo) {
@@ -231,28 +275,105 @@ func (p *Parser) updateMapAreaStats(e events.Kill) {
 }
 
 func (p *Parser) handleFrameDone(e events.FrameDone) {
-	for _, player := range p.parser.GameState().Participants().Playing() {
-		for _, enemy := range p.parser.GameState().Participants().Playing() {
-			if player.Team == enemy.Team || player.SteamID64 == 0 || enemy.SteamID64 == 0 {
+	p.updateSmokes(p.parser.GameState())
+	p.trackPerFramePlayerData(p.parser.GameState())
+}
+
+func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
+	currentTick := gs.IngameTick()
+	frameData := FrameData{
+		Tick:          currentTick,
+		Players:       []PlayerFrameData{},
+		VisibilityMap: map[uint64]map[uint64]bool{},
+	}
+
+	// Gather data for each player
+	for _, player := range gs.Participants().Playing() {
+		if player.SteamID64 == 0 {
+			continue
+		}
+
+		pFrame := PlayerFrameData{
+			SteamID:    player.SteamID64,
+			Position:   player.Position(),
+			ViewAngleX: player.ViewDirectionX(),
+			IsAlive:    player.IsAlive(),
+		}
+		frameData.Players = append(frameData.Players, pFrame)
+	}
+
+	// Now do a custom geometry check for each (observer, target)
+	for i := range frameData.Players {
+		obs := frameData.Players[i]
+		if !obs.IsAlive {
+			continue
+		}
+
+		// Initialize the observer's map
+		if _, ok := frameData.VisibilityMap[obs.SteamID]; !ok {
+			frameData.VisibilityMap[obs.SteamID] = map[uint64]bool{}
+		}
+
+		for j := range frameData.Players {
+			tgt := frameData.Players[j]
+			if obs.SteamID == tgt.SteamID || !tgt.IsAlive {
 				continue
 			}
 
-			stats := p.match.GetOrCreatePlayerStats(player.SteamID64, player.Name)
-			stats.Velocity[player.Name] = magnitude(player.Velocity())
-
-			if player.IsAlive() && enemy.IsAlive() && isVisible(player, enemy) {
-				spotterID := player.SteamID64
-				spottedID := enemy.SteamID64
-
-				if _, exists := p.enemySpottedTime[spotterID]; !exists {
-					p.enemySpottedTime[spotterID] = make(map[uint64]time.Time)
-				}
-				if _, exists := p.enemySpottedTime[spotterID][spottedID]; !exists {
-					p.enemySpottedTime[spotterID][spottedID] = time.Now()
-				}
-			}
+			// Our custom check: can obs see any part of tgt's bounding box?
+			// For a simple approach, do a ray from obs.Position to tgt.Position
+			visible := p.rayVisible(obs, tgt)
+			frameData.VisibilityMap[obs.SteamID][tgt.SteamID] = visible
 		}
 	}
+
+	// Finally, store fd in p.frameStorage
+	p.frameStorage.frames = append(p.frameStorage.frames, frameData)
+}
+
+func (p *Parser) rayVisible(obs PlayerFrameData, tgt PlayerFrameData) bool {
+	// 1a) Check if there's a wall or static map geometry in between.
+	//    - demoinfocs doesn't give you the entire map geometry by default.
+	//      You might need a custom approach or an external nav mesh / BSP parser.
+	// 1b) Check if there's a wall in between? (Not implemented)
+	// 2) Check for smoke and flash impact
+	if p.isLineInSmoke(obs.Position, tgt.Position) || p.isPlayerFlashed(obs.SteamID) {
+		return false
+	}
+
+	// 3) Basic distance check
+	dist := tgt.Position.Sub(obs.Position).Norm()
+	if dist > 2000 {
+		return false
+	}
+
+	// 4) Angle check
+	angleToTarget := calcAngleBetween(obs.Position, tgt.Position)
+	angleDiff := float32(math.Abs(float64(angleToTarget - obs.ViewAngleX)))
+
+	// Possibly handle wrap-around of angles here (e.g., 359 vs 0)
+	if angleDiff > 180 {
+		angleDiff = 360 - angleDiff
+	}
+
+	// If attacker needs the target in ~60° FOV:
+	if angleDiff > 60 {
+		return false
+	}
+
+	return true
+}
+
+func calcAngleBetween(from, to r3.Vector) float32 {
+	deltaX := to.X - from.X
+	deltaY := to.Y - from.Y
+
+	// We'll ignore Z for the horizontal angle
+	// TODO: Should we consider Z for vertical angle?
+	angleRad := math.Atan2(float64(deltaY), float64(deltaX))
+	angleDeg := angleRad * 180.0 / math.Pi
+
+	return float32(angleDeg)
 }
 
 func getUtilityValue(grenadeType common.EquipmentType) int {
@@ -374,12 +495,24 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 
 	stats.ShotsTotal++
 
-	// Track spotted shots
 	enemySpotted := false
+
+	shooterID := e.Shooter.SteamID64
+	currentTick := p.parser.GameState().IngameTick()
+
 	for _, enemy := range p.parser.GameState().Participants().Playing() {
-		if enemy.Team != e.Shooter.Team && enemy.IsAlive() && isVisible(e.Shooter, enemy) {
+		// Skip same or invalid team
+		if enemy.Team == e.Shooter.Team || enemy.SteamID64 == 0 {
+			continue
+		}
+
+		firstVisibleTick, found := p.findFirstVisibleTick(shooterID, enemy.SteamID64, currentTick, 64 /* ~2s if 32 ticks/sec */)
+
+		if found {
 			enemySpotted = true
-			break
+			timeInView := float64(currentTick-firstVisibleTick) / 64.0 // or 32 if 32 ticks/second
+			fmt.Printf("Attacker saw target for ~%.2f seconds before shooting.\n", timeInView)
+			stats.TimeToFirstShot = append(stats.TimeToFirstShot, timeInView)
 		}
 	}
 
@@ -402,6 +535,31 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 	}
 
 	p.lastWeaponFireTime[e.Shooter.SteamID64] = time.Now()
+}
+
+func (p *Parser) findFirstVisibleTick(attackerID, victimID uint64, currentTick, maxLookback int) (int, bool) {
+	// Iterate backward from the last stored frames
+	// TODO: could be a binary search if we store frames sorted by tick.
+	foundTick := -1
+	for i := len(p.frameStorage.frames) - 1; i >= 0; i-- {
+		fd := p.frameStorage.frames[i]
+		if fd.Tick < currentTick-maxLookback {
+			// we've gone too far back
+			break
+		}
+		// if in this frame, the victim was visible to attacker
+		if visibleMap, ok := fd.VisibilityMap[attackerID]; ok {
+			if visibleMap[victimID] {
+				foundTick = fd.Tick
+			}
+		}
+	}
+
+	if foundTick >= 0 {
+		return foundTick, true
+	}
+
+	return -1, false
 }
 
 func (p *Parser) isLiveGameRound() bool {
@@ -444,6 +602,13 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 
 	stats := p.match.GetOrCreatePlayerStats(e.Attacker.SteamID64, e.Attacker.Name)
 
+	currentTick := p.parser.GameState().IngameTick()
+	_, found := p.findFirstVisibleTick(e.Attacker.SteamID64, e.Player.SteamID64, currentTick, 64)
+	if found {
+		stats.EnemySpottedHits++
+		// TODO: track time to first damage here
+	}
+
 	// exclude bomb damage
 	if e.Weapon.Type != common.EqBomb {
 		victimID := e.Player.SteamID64
@@ -479,13 +644,6 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 
 	if e.HitGroup == events.HitGroupHead {
 		stats.Headshots++
-	}
-
-	// Track spotted hits
-	if _, exists := p.enemySpottedTime[e.Attacker.SteamID64]; exists {
-		if _, spotted := p.enemySpottedTime[e.Attacker.SteamID64][e.Player.SteamID64]; spotted {
-			stats.EnemySpottedHits++
-		}
 	}
 
 	// Track spray hits
@@ -624,18 +782,52 @@ func getMapArea(pos Point) string {
 	return "mid"
 }
 
-func isVisible(observer, target *common.Player) bool {
-	observerPos := observer.Position()
-	targetPos := target.Position()
+func (p *Parser) isPlayerFlashed(playerID uint64) bool {
+	if flashEndTime, exists := p.flashedPlayers[playerID]; exists {
+		// If now is *before* flashEndTime, the player is still flashed
+		return time.Now().Before(flashEndTime)
+	}
+	return false
+}
 
-	// Create a ray from observer to target
-	ray := r3.Vector{
-		X: targetPos.X - observerPos.X,
-		Y: targetPos.Y - observerPos.Y,
-		Z: targetPos.Z - observerPos.Z,
+func (p *Parser) updateSmokes(gameState dem.GameState) {
+	// Clear old smokes
+	p.smokePositions = nil
+
+	// Get all active smoke positions
+	for _, grenade := range gameState.GrenadeProjectiles() {
+		if grenade.WeaponInstance.Type == common.EqSmoke {
+			p.smokePositions = append(p.smokePositions, grenade.Position())
+		}
+	}
+}
+
+func (p *Parser) isLineInSmoke(start, end r3.Vector) bool {
+	for _, smokePos := range p.smokePositions {
+		// Simple smoke check - if line passes within smoke radius
+		smokeRadius := 144.0 // Source engine units
+
+		// Check if line segment intersects with smoke sphere
+		// Using simplified distance check for performance
+		distToLine := distancePointToLine(smokePos, start, end)
+		if distToLine < smokeRadius {
+			return true
+		}
+	}
+	return false
+}
+
+func distancePointToLine(point, lineStart, lineEnd r3.Vector) float64 {
+	// Calculate distance from point to line segment
+	line := lineEnd.Sub(lineStart)
+	len := line.Norm()
+	if len == 0 {
+		return point.Sub(lineStart).Norm()
 	}
 
-	// Simple line of sight check
-	maxDistance := math.Sqrt(ray.X*ray.X + ray.Y*ray.Y + ray.Z*ray.Z)
-	return maxDistance < 1000 // Arbitrary visibility range
+	t := point.Sub(lineStart).Dot(line) / (len * len)
+	t = math.Max(0, math.Min(1, t))
+
+	projection := lineStart.Add(line.Mul(t))
+	return point.Sub(projection).Norm()
 }

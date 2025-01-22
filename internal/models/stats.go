@@ -21,6 +21,7 @@ type PlayerStats struct {
 	SprayHits           int
 	CounterStrafedShots int
 	TimeToFirstDamage   []float64
+	TimeToFirstShot     []float64
 	FirstBulletHits     int
 	FirstBulletShots    int
 	CrosshairPlacement  []float64
@@ -140,6 +141,7 @@ func NewPlayerStats() *PlayerStats {
 		WeaponStats:        make(map[string]*WeaponStats),
 		MapAreaKills:       make(map[string]int),
 		MapAreaDeaths:      make(map[string]int),
+		TimeToFirstShot:    make([]float64, 0),
 	}
 }
 

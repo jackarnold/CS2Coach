@@ -40,13 +40,16 @@ func (m *Match) GetOrCreatePlayerStats(steamID uint64, name string) *PlayerStats
 
 	// If neither found, create new stats
 	stats := &PlayerStats{
-		Name:            name,
-		SteamID:         steamID,
-		WeaponStats:     make(map[string]*WeaponStats),
-		SurvivalByPhase: make(map[string]int),
-		MapAreaKills:    make(map[string]int),
-		MapAreaDeaths:   make(map[string]int),
-		Velocity:        make(map[string]float64),
+		Name:               name,
+		SteamID:            steamID,
+		WeaponStats:        make(map[string]*WeaponStats),
+		SurvivalByPhase:    make(map[string]int),
+		MapAreaKills:       make(map[string]int),
+		MapAreaDeaths:      make(map[string]int),
+		Velocity:           make(map[string]float64),
+		TimeToFirstShot:    make([]float64, 0),
+		TimeToFirstDamage:  make([]float64, 0),
+		CrosshairPlacement: make([]float64, 0),
 	}
 
 	if steamID != 0 {
