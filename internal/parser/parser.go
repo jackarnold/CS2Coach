@@ -31,12 +31,14 @@ type Parser struct {
 	lastWeaponFireTime map[uint64]time.Time
 	angleHistory       map[uint64][]float32
 	lastKnownHP        map[uint64]int // steamID -> current HP
+	lastDamageBy       map[uint64]map[uint64]int
 }
 
 func NewParser(debug bool) *Parser {
 	return &Parser{
 		debug:              debug,
 		match:              models.NewMatch(),
+		lastDamageBy:       make(map[uint64]map[uint64]int),
 		alivePlayersByTeam: make(map[int]int),
 		currentRoundKills:  make(map[uint64]map[int]int),
 		sprayStartTime:     make(map[uint64]time.Time),
@@ -98,107 +100,8 @@ func magnitude(v r3.Vector) float64 {
 }
 
 func (p *Parser) registerEventHandlers(debug bool) {
-	// Server info handler
-	p.parser.RegisterNetMessageHandler(func(msg *msgs2.CSVCMsg_ServerInfo) {
-		p.match.MapName = msg.GetMapName()
-		if debug {
-			fmt.Printf("Map name from server info: %s\n", *msg.MapName)
-		}
-	})
-
-	// Match start handler
-	p.parser.RegisterEventHandler(func(e events.MatchStart) {
-		p.parser.GameState().TotalRoundsPlayed()
-		for _, player := range p.parser.GameState().Participants().Playing() {
-			if player.SteamID64 == 0 {
-				continue
-			}
-			stats := p.match.GetOrCreatePlayerStats(player.SteamID64, player.Name)
-			stats.Team = int(player.Team)
-			stats.IsAlive = true
-		}
-	})
-
-	// Damage tracking
-	lastDamageBy := make(map[uint64]map[uint64]int)
-	p.parser.RegisterEventHandler(func(e events.PlayerHurt) {
-		if e.Attacker == nil || e.Player == nil || e.Attacker.SteamID64 == 0 ||
-			e.Player.SteamID64 == 0 || e.Attacker.SteamID64 == e.Player.SteamID64 {
-			return
-		}
-
-		victimID := e.Player.SteamID64
-		attackerID := e.Attacker.SteamID64
-
-		if _, exists := lastDamageBy[victimID]; !exists {
-			lastDamageBy[victimID] = make(map[uint64]int)
-		}
-		lastDamageBy[victimID][attackerID] += e.HealthDamage
-	})
-
-	// Kill assist handler
-	p.parser.RegisterEventHandler(func(e events.Kill) {
-		if e.Killer == nil || e.Victim == nil || e.Killer.SteamID64 == 0 || e.Victim.SteamID64 == 0 {
-			return
-		}
-
-		victimID := e.Victim.SteamID64
-		killerID := e.Killer.SteamID64
-
-		if damages, exists := lastDamageBy[victimID]; exists {
-			for attackerID, damage := range damages {
-				if attackerID != killerID && damage >= 41 {
-					for _, player := range p.parser.GameState().Participants().All() {
-						if player.SteamID64 == attackerID {
-							attackerStats := p.match.GetOrCreatePlayerStats(attackerID, player.Name)
-							attackerStats.Assists++
-							break
-						}
-					}
-				}
-			}
-			delete(lastDamageBy, victimID)
-		}
-
-		if e.AssistedFlash {
-			for _, player := range p.parser.GameState().Participants().Playing() {
-				if player.Team != e.Victim.Team && player.FlashDurationTime() > 0 {
-					stats := p.match.GetOrCreatePlayerStats(player.SteamID64, player.Name)
-					stats.FlashAssists++
-					break
-				}
-			}
-		}
-	})
-
-	// Spotted enemies handler (abusing for tracking player positions too)
-	p.parser.RegisterEventHandler(func(e events.FrameDone) {
-
-		for _, player := range p.parser.GameState().Participants().Playing() {
-			for _, enemy := range p.parser.GameState().Participants().Playing() {
-				if player.Team == enemy.Team || player.SteamID64 == 0 || enemy.SteamID64 == 0 {
-					continue
-				}
-
-				stats := p.match.GetOrCreatePlayerStats(player.SteamID64, player.Name)
-				stats.Velocity[player.Name] = magnitude(player.Velocity())
-
-				if player.IsAlive() && enemy.IsAlive() && isVisible(player, enemy) {
-					spotterID := player.SteamID64
-					spottedID := enemy.SteamID64
-
-					if _, exists := p.enemySpottedTime[spotterID]; !exists {
-						p.enemySpottedTime[spotterID] = make(map[uint64]time.Time)
-					}
-					if _, exists := p.enemySpottedTime[spotterID][spottedID]; !exists {
-						p.enemySpottedTime[spotterID][spottedID] = time.Now()
-					}
-				}
-			}
-		}
-	})
-
-	// Core event handlers
+	p.parser.RegisterNetMessageHandler(p.handleServerInfo)
+	p.parser.RegisterEventHandler(p.handleMatchStart)
 	p.parser.RegisterEventHandler(p.handleKill)
 	p.parser.RegisterEventHandler(p.handleWeaponFire)
 	p.parser.RegisterEventHandler(p.handlePlayerHurt)
@@ -208,6 +111,148 @@ func (p *Parser) registerEventHandlers(debug bool) {
 	p.parser.RegisterEventHandler(p.handleUtility)
 	p.parser.RegisterEventHandler(p.handleActivity)
 	p.parser.RegisterEventHandler(p.handlePeekTracking)
+	p.parser.RegisterEventHandler(p.handleFrameDone)
+}
+
+func (p *Parser) handleServerInfo(msg *msgs2.CSVCMsg_ServerInfo) {
+	p.match.MapName = msg.GetMapName()
+}
+
+func (p *Parser) handleMatchStart(e events.MatchStart) {
+	p.parser.GameState().TotalRoundsPlayed()
+	for _, player := range p.parser.GameState().Participants().Playing() {
+		if player.SteamID64 == 0 {
+			continue
+		}
+		stats := p.match.GetOrCreatePlayerStats(player.SteamID64, player.Name)
+		stats.Team = int(player.Team)
+		stats.IsAlive = true
+	}
+}
+
+func (p *Parser) handleKill(e events.Kill) {
+	if (!p.isLiveGameRound()) || e.Killer == nil || e.Victim == nil ||
+		e.Killer.SteamID64 == 0 || e.Victim.SteamID64 == 0 {
+		return
+	}
+
+	if p.debug {
+		fmt.Printf("Kill Event: %s killed %s (Round: %d, IsLive: %v)\n",
+			e.Killer.Name, e.Victim.Name,
+			p.parser.GameState().TotalRoundsPlayed(),
+			!p.parser.GameState().IsWarmupPeriod() && !p.parser.GameState().IsFreezetimePeriod())
+	}
+
+	killerStats := p.match.GetOrCreatePlayerStats(e.Killer.SteamID64, e.Killer.Name)
+	victimStats := p.match.GetOrCreatePlayerStats(e.Victim.SteamID64, e.Victim.Name)
+
+	killerStats.Kills++
+	victimStats.Deaths++
+	victimStats.IsAlive = false
+
+	// Handle kill assists
+	victimID := e.Victim.SteamID64
+	killerID := e.Killer.SteamID64
+
+	now := time.Now()
+	p.lastKillTime = &now
+	p.lastKillVictim = victimID
+	p.lastKillKiller = killerStats
+
+	if damages, exists := p.lastDamageBy[victimID]; exists {
+		assistGiven := make(map[uint64]bool)
+		for attackerID, damage := range damages {
+			if attackerID != killerID && damage >= 41 && !assistGiven[attackerID] {
+				attackerStats := p.match.GetOrCreatePlayerStats(attackerID, "")
+				attackerStats.Assists++
+				assistGiven[attackerID] = true
+			}
+		}
+		delete(p.lastDamageBy, victimID)
+	}
+
+	// Handle flash assists
+	if e.AssistedFlash {
+		for _, player := range p.parser.GameState().Participants().Playing() {
+			if player.Team != e.Victim.Team && player.FlashDurationTime() > 0 &&
+				player.SteamID64 != killerID {
+				stats := p.match.GetOrCreatePlayerStats(player.SteamID64, player.Name)
+				stats.Assists++
+				break
+			}
+		}
+	}
+
+	p.updateMultiKills(e)
+	p.updateMapAreaStats(e)
+}
+
+func (p *Parser) updateMultiKills(e events.Kill) {
+	currentRound := p.parser.GameState().TotalRoundsPlayed()
+	if _, exists := p.currentRoundKills[e.Killer.SteamID64]; !exists {
+		p.currentRoundKills[e.Killer.SteamID64] = make(map[int]int)
+	}
+	p.currentRoundKills[e.Killer.SteamID64][currentRound]++
+
+	killCount := p.currentRoundKills[e.Killer.SteamID64][currentRound]
+	killerStats := p.match.GetOrCreatePlayerStats(e.Killer.SteamID64, e.Killer.Name)
+
+	switch killCount {
+	case 2:
+		killerStats.TwoKills++
+	case 3:
+		killerStats.ThreeKills++
+	case 4:
+		killerStats.FourKills++
+	case 5:
+		killerStats.FiveKills++
+	}
+}
+
+func (p *Parser) updateMapAreaStats(e events.Kill) {
+	killerStats := p.match.GetOrCreatePlayerStats(e.Killer.SteamID64, e.Killer.Name)
+	victimStats := p.match.GetOrCreatePlayerStats(e.Victim.SteamID64, e.Victim.Name)
+
+	if area := getMapArea(Point{
+		X: float32(e.Killer.Position().X),
+		Y: float32(e.Killer.Position().Y),
+		Z: float32(e.Killer.Position().Z),
+	}); area != "" {
+		killerStats.MapAreaKills[area]++
+	}
+
+	if area := getMapArea(Point{
+		X: float32(e.Victim.Position().X),
+		Y: float32(e.Victim.Position().Y),
+		Z: float32(e.Victim.Position().Z),
+	}); area != "" {
+		victimStats.MapAreaDeaths[area]++
+	}
+}
+
+func (p *Parser) handleFrameDone(e events.FrameDone) {
+	for _, player := range p.parser.GameState().Participants().Playing() {
+		for _, enemy := range p.parser.GameState().Participants().Playing() {
+			if player.Team == enemy.Team || player.SteamID64 == 0 || enemy.SteamID64 == 0 {
+				continue
+			}
+
+			stats := p.match.GetOrCreatePlayerStats(player.SteamID64, player.Name)
+			stats.Velocity[player.Name] = magnitude(player.Velocity())
+
+			if player.IsAlive() && enemy.IsAlive() && isVisible(player, enemy) {
+				spotterID := player.SteamID64
+				spottedID := enemy.SteamID64
+
+				if _, exists := p.enemySpottedTime[spotterID]; !exists {
+					p.enemySpottedTime[spotterID] = make(map[uint64]time.Time)
+				}
+				if _, exists := p.enemySpottedTime[spotterID][spottedID]; !exists {
+					p.enemySpottedTime[spotterID][spottedID] = time.Now()
+				}
+			}
+		}
+	}
 }
 
 func getUtilityValue(grenadeType common.EquipmentType) int {
@@ -313,82 +358,6 @@ func (p *Parser) handleActivity(e events.PlayerHurt) {
 	}
 }
 
-func (p *Parser) handleKill(e events.Kill) {
-	if (!p.isLiveGameRound()) || e.Killer == nil || e.Victim == nil || e.Killer.SteamID64 == 0 || e.Victim.SteamID64 == 0 {
-		return
-	}
-
-	killerStats := p.match.GetOrCreatePlayerStats(e.Killer.SteamID64, e.Killer.Name)
-	victimStats := p.match.GetOrCreatePlayerStats(e.Victim.SteamID64, e.Victim.Name)
-
-	killerStats.Kills++
-	victimStats.Deaths++
-	victimStats.IsAlive = false
-
-	if area := getMapArea(Point{
-		X: float32(e.Killer.Position().X),
-		Y: float32(e.Killer.Position().Y),
-		Z: float32(e.Killer.Position().Z),
-	}); area != "" {
-		killerStats.MapAreaKills[area]++
-	}
-
-	if area := getMapArea(Point{
-		X: float32(e.Victim.Position().X),
-		Y: float32(e.Victim.Position().Y),
-		Z: float32(e.Victim.Position().Z),
-	}); area != "" {
-		victimStats.MapAreaDeaths[area]++
-	}
-
-	if e.IsHeadshot {
-		killerStats.Headshots++
-	}
-
-	// Multi-kill tracking
-	currentRound := p.parser.GameState().TotalRoundsPlayed()
-	if _, exists := p.currentRoundKills[e.Killer.SteamID64]; !exists {
-		p.currentRoundKills[e.Killer.SteamID64] = make(map[int]int)
-	}
-	p.currentRoundKills[e.Killer.SteamID64][currentRound]++
-
-	killCount := p.currentRoundKills[e.Killer.SteamID64][currentRound]
-	switch killCount {
-	case 2:
-		killerStats.TwoKills++
-	case 3:
-		killerStats.ThreeKills++
-	case 4:
-		killerStats.FourKills++
-	case 5:
-		killerStats.FiveKills++
-	}
-
-	// Trade kill tracking
-	now := time.Now()
-	if p.lastKillTime != nil && now.Sub(*p.lastKillTime) <= 3*time.Second {
-		if p.lastKillKiller != nil && e.Victim.Team != e.Killer.Team {
-			if e.Victim.SteamID64 == p.lastKillKiller.SteamID {
-				killerStats.TradeKills++
-				killerStats.TradeKillAttempts++
-				killerStats.TradeKillOpportunities++
-			}
-		}
-	}
-
-	// Update trade opportunities for other team members
-	for _, player := range p.parser.GameState().Participants().Playing() {
-		if player.Team == e.Victim.Team && player.IsAlive() && player.SteamID64 != e.Victim.SteamID64 {
-			stats := p.match.GetOrCreatePlayerStats(player.SteamID64, player.Name)
-			stats.TradeKillOpportunities++
-		}
-	}
-
-	p.lastKillTime = &now
-	p.lastKillVictim = e.Victim.SteamID64
-	p.lastKillKiller = killerStats
-}
-
 func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 	if (!p.isLiveGameRound()) || e.Shooter == nil || e.Shooter.SteamID64 == 0 {
 		return
@@ -437,20 +406,14 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 
 func (p *Parser) isLiveGameRound() bool {
 	gs := p.parser.GameState()
-	roundNum := gs.TotalRoundsPlayed()
-	isLive := !gs.IsWarmupPeriod()
-
-	if !isLive {
-		fmt.Printf("Round %d not live: warmup=%v\n",
-			roundNum, gs.IsWarmupPeriod())
-	}
-
-	return isLive
+	return !gs.IsWarmupPeriod() && gs.TotalRoundsPlayed() >= 0
 }
 
 func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 	currentRound := p.parser.GameState().TotalRoundsPlayed()
-	fmt.Printf("Processing damage event in round %d\n", currentRound)
+	if p.debug {
+		fmt.Printf("Processing damage event in round %d\n", currentRound)
+	}
 
 	if (!p.isLiveGameRound()) || e.Attacker == nil || e.Player == nil ||
 		e.Attacker.SteamID64 == 0 || e.Player.SteamID64 == 0 {
@@ -484,6 +447,14 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 	// exclude bomb damage
 	if e.Weapon.Type != common.EqBomb {
 		victimID := e.Player.SteamID64
+
+		// Track damage for assists
+		if e.Attacker.Team != e.Player.Team && e.Attacker.SteamID64 != e.Player.SteamID64 {
+			if _, exists := p.lastDamageBy[e.Player.SteamID64]; !exists {
+				p.lastDamageBy[e.Player.SteamID64] = make(map[uint64]int)
+			}
+			p.lastDamageBy[e.Player.SteamID64][e.Attacker.SteamID64] += e.HealthDamage
+		}
 
 		// "Old HP" we have stored
 		oldHP := p.lastKnownHP[victimID]
@@ -541,6 +512,7 @@ func (p *Parser) handleRoundStart(e events.RoundStart) {
 	p.enemySpottedTime = make(map[uint64]map[uint64]time.Time) // Reset spotted time
 	p.firstDamageTime = make(map[uint64]map[uint64]time.Time)  // Reset damage time
 	p.lastWeaponFireTime = make(map[uint64]time.Time)          // Reset weapon fire time
+	p.lastDamageBy = make(map[uint64]map[uint64]int)           // Reset damage tracking
 
 	// Reset all player damage counts
 	for _, player := range p.parser.GameState().Participants().Playing() {
@@ -558,6 +530,9 @@ func (p *Parser) handleRoundStart(e events.RoundStart) {
 			stats.TotalDamage = 0 //Ensure that we don't count warmup damage
 			stats.SurvivalByPhase = make(map[string]int)
 			stats.RoundsActive = 0
+			stats.Kills = 0
+			stats.Deaths = 0
+			stats.Assists = 0
 			continue
 		}
 
