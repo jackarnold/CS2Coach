@@ -30,6 +30,7 @@ type Parser struct {
 	currentRoundKills  map[uint64]map[int]int
 	lastWeaponFireTime map[uint64]time.Time
 	angleHistory       map[uint64][]float32
+	lastKnownHP        map[uint64]int // steamID -> current HP
 }
 
 func NewParser(debug bool) *Parser {
@@ -44,6 +45,7 @@ func NewParser(debug bool) *Parser {
 		firstDamageTime:    make(map[uint64]map[uint64]time.Time),
 		lastWeaponFireTime: make(map[uint64]time.Time),
 		angleHistory:       make(map[uint64][]float32),
+		lastKnownHP:        make(map[uint64]int),
 	}
 }
 
@@ -436,28 +438,24 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 func (p *Parser) isLiveGameRound() bool {
 	gs := p.parser.GameState()
 	roundNum := gs.TotalRoundsPlayed()
+	isLive := !gs.IsWarmupPeriod()
 
-	if gs.IsWarmupPeriod() || gs.IsFreezetimePeriod() || roundNum < 1 {
-		fmt.Printf("Round %d not live: warmup=%v freeze=%v\n",
-			roundNum, gs.IsWarmupPeriod(), gs.IsFreezetimePeriod())
-		return false
+	if !isLive {
+		fmt.Printf("Round %d not live: warmup=%v\n",
+			roundNum, gs.IsWarmupPeriod())
 	}
-	return true
+
+	return isLive
 }
 
 func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
+	currentRound := p.parser.GameState().TotalRoundsPlayed()
+	fmt.Printf("Processing damage event in round %d\n", currentRound)
+
 	if (!p.isLiveGameRound()) || e.Attacker == nil || e.Player == nil ||
 		e.Attacker.SteamID64 == 0 || e.Player.SteamID64 == 0 {
-		return
-	}
-
-	// Don't count friendly fire or self damage
-	if e.Attacker.Team == e.Player.Team || e.Attacker.SteamID64 == e.Player.SteamID64 {
-		return
-	}
-
-	// Don't count damage to dead players
-	if !e.Player.IsAlive() {
+		fmt.Printf("Skipping damage event, isLiveGameRound=%v, attacker=%v, player=%v\n",
+			p.isLiveGameRound(), e.Attacker != nil, e.Player != nil)
 		return
 	}
 
@@ -482,19 +480,31 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 	}
 
 	stats := p.match.GetOrCreatePlayerStats(e.Attacker.SteamID64, e.Attacker.Name)
-	stats.HitsTotal++
 
-	// Count damage only if it's not utility (handled in handleActivity)
-	// Also exclude bomb damage
-	if e.Weapon.Type != common.EqHE &&
-		e.Weapon.Type != common.EqMolotov &&
-		e.Weapon.Type != common.EqIncendiary &&
-		e.Weapon.Type != common.EqSmoke &&
-		e.Weapon.Type != common.EqFlash &&
-		e.Weapon.Type != common.EqDecoy &&
-		e.Weapon.Type != common.EqBomb {
-		stats.TotalDamage += min(e.HealthDamage, e.Player.Health())
+	// exclude bomb damage
+	if e.Weapon.Type != common.EqBomb {
+		victimID := e.Player.SteamID64
+
+		// "Old HP" we have stored
+		oldHP := p.lastKnownHP[victimID]
+
+		// Potential bullet damage from the event
+		rawDamage := e.HealthDamage
+
+		// Net actual HP lost is at most what the victim had left
+		actualDamage := min(rawDamage, oldHP)
+
+		// Don't count friendly fire or self damage toward the players total damage done
+		if e.Attacker.Team != e.Player.Team && e.Attacker.SteamID64 != e.Player.SteamID64 {
+			stats.TotalDamage += actualDamage
+		}
+
+		// Deduct from victim's stored HP
+		newHP := max(oldHP-actualDamage, 0)
+		p.lastKnownHP[victimID] = newHP
 	}
+
+	stats.HitsTotal++
 
 	// Track spotted hits
 	if _, exists := p.enemySpottedTime[e.Attacker.SteamID64]; exists {
@@ -539,17 +549,21 @@ func (p *Parser) handleRoundStart(e events.RoundStart) {
 		}
 		stats := p.match.GetOrCreatePlayerStats(player.SteamID64, player.Name)
 		stats.IsAlive = true
-		//stats.TotalDamage = 0 // Reset damage at round start
 		p.alivePlayersByTeam[int(player.Team)]++
 
+		// Reset player health to 100 on round start
+		p.lastKnownHP[player.SteamID64] = 100
+
 		if p.parser.GameState().IsWarmupPeriod() {
-			stats.TotalDamage = 0 // this might be a hack
+			stats.TotalDamage = 0 //Ensure that we don't count warmup damage
 			stats.SurvivalByPhase = make(map[string]int)
-			stats.SurvivalByPhase[player.Name] = 0
-		} else {
-			stats.SurvivalByPhase[player.Name]++
+			stats.RoundsActive = 0
+			continue
 		}
 
+		if !p.parser.GameState().IsWarmupPeriod() {
+			stats.RoundsActive++
+		}
 	}
 
 	p.match.AddEvent(models.Event{

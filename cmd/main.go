@@ -92,8 +92,8 @@ func handleAnalyze(demoPath, playerName, steamID string, debug, verbose bool) {
 
 func displayLeetifyMetrics(stats *models.AnalyzedStats, match *models.Match, playerName string, verbose bool) {
 	// Calculate metrics
-	roundCount := stats.BasicStats.SurvivalByPhase[playerName]
-	fmt.Println("stats.BasicStats.SurvivalByPhase[playerName]: " + fmt.Sprint(stats.BasicStats.SurvivalByPhase[playerName]))
+	roundCount := stats.BasicStats.RoundsActive
+	fmt.Println("stats.BasicStats.RoundsActive: " + fmt.Sprint(stats.BasicStats.RoundsActive))
 	leetifyMetrics := analyzer.CalculateLeetifyMetrics(&stats.BasicStats, roundCount)
 
 	fmt.Printf("\nLeetify Analysis:\n")

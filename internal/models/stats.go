@@ -36,6 +36,7 @@ type PlayerStats struct {
 
 	// Round metrics
 	RoundsSurvived  int
+	RoundsActive    int
 	SurvivalByPhase map[string]int
 	OpeningDuels    int
 	OpeningDuelsWon int
