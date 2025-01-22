@@ -477,6 +477,10 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 
 	stats.HitsTotal++
 
+	if e.HitGroup == events.HitGroupHead {
+		stats.Headshots++
+	}
+
 	// Track spotted hits
 	if _, exists := p.enemySpottedTime[e.Attacker.SteamID64]; exists {
 		if _, spotted := p.enemySpottedTime[e.Attacker.SteamID64][e.Player.SteamID64]; spotted {
