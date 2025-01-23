@@ -8,6 +8,7 @@ require (
 )
 
 require (
+	github.com/NublyBR/go-vpk v0.0.0-20240806023734-25ff2ef0976b
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/markus-wa/go-unassert v0.1.3 // indirect
 	github.com/markus-wa/gobitread v0.2.4 // indirect

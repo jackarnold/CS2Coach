@@ -3,10 +3,13 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/NublyBR/go-vpk"
 	"github.com/richardkiene/CS2Coach/internal/analyzer"
 	"github.com/richardkiene/CS2Coach/internal/coach"
 	"github.com/richardkiene/CS2Coach/internal/ml"
@@ -18,6 +21,7 @@ func main() {
 	analyzeCmd := flag.NewFlagSet("analyze", flag.ExitOnError)
 	trainCmd := flag.NewFlagSet("train", flag.ExitOnError)
 	predictCmd := flag.NewFlagSet("predict", flag.ExitOnError)
+	inspectVPKCmd := flag.NewFlagSet("inspect-vpk", flag.ExitOnError)
 
 	// Analyze command flags
 	analyzeDemoPath := analyzeCmd.String("demo", "", "Path to CS2 demo file")
@@ -35,8 +39,13 @@ func main() {
 	predictPlayerName := predictCmd.String("player", "", "Player name to predict")
 	predictSteamID := predictCmd.String("steamid", "", "Steam ID to predict")
 
+	// Inspect VPK command flags
+	vpkPath := inspectVPKCmd.String("path", "", "Path to VPK file to inspect")
+	outputDir := inspectVPKCmd.String("output", "", "Output directory for extracted files")
+	mapName := inspectVPKCmd.String("map", "", "Map name to extract (without .bsp extension)")
+
 	if len(os.Args) < 2 {
-		fmt.Println("Expected 'analyze', 'train', or 'predict' subcommands")
+		fmt.Println("Expected 'analyze', 'train', 'predict', or 'inspect-vpk' subcommands")
 		os.Exit(1)
 	}
 
@@ -50,9 +59,61 @@ func main() {
 	case "predict":
 		predictCmd.Parse(os.Args[2:])
 		handlePredict(*predictDemoPath, *predictPlayerName, *predictSteamID, true, true)
+	case "inspect-vpk":
+		inspectVPKCmd.Parse(os.Args[2:])
+		handleInspectVPK(*vpkPath, *outputDir, *mapName)
 	default:
 		fmt.Printf("%q is not valid command.\n", os.Args[1])
 		os.Exit(1)
+	}
+}
+
+func handleInspectVPK(vpkPath, outputDir, mapName string) {
+	if vpkPath == "" {
+		log.Fatal("Please provide a VPK file path")
+	}
+
+	// Create output directory if needed
+	if outputDir == "" {
+		outputDir = filepath.Join(os.TempDir(), "cs2coach_bsp_test")
+	}
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		log.Fatalf("Failed to create output directory: %v", err)
+	}
+
+	fmt.Printf("Inspecting VPK: %s\n", vpkPath)
+
+	// Open the VPK file (using OpenAny for standalone VPKs)
+	pak, err := vpk.OpenAny(vpkPath)
+	if err != nil {
+		log.Fatalf("Failed to open VPK: %v", err)
+	}
+	defer pak.Close()
+
+	// Iterate over entries
+	for _, entry := range pak.Entries() {
+		fmt.Printf("Found entry: %s (size: %d bytes)\n", entry.Filename(), entry.Length())
+
+		if strings.HasSuffix(entry.Filename(), ".bsp") {
+			outputFile := filepath.Join(outputDir, filepath.Base(entry.Filename()))
+			reader, err := entry.Open()
+			if err != nil {
+				log.Fatalf("Failed to open entry: %v", err)
+			}
+			defer reader.Close()
+
+			outFile, err := os.Create(outputFile)
+			if err != nil {
+				log.Fatalf("Failed to create output file: %v", err)
+			}
+			defer outFile.Close()
+
+			_, err = io.Copy(outFile, reader)
+			if err != nil {
+				log.Fatalf("Failed to extract BSP: %v", err)
+			}
+			fmt.Printf("Extracted BSP to: %s\n", outputFile)
+		}
 	}
 }
 
@@ -64,6 +125,7 @@ func handleAnalyze(demoPath, playerName, steamID string, debug, verbose bool) {
 		log.Fatal("Please provide either player name or Steam ID")
 	}
 
+	// Step 1: Parse the demo to get the map name
 	p := parser.NewParser(debug)
 	fmt.Printf("Parsing demo file: %s\n", demoPath)
 	match, err := p.ParseDemo(demoPath, debug)
@@ -71,15 +133,45 @@ func handleAnalyze(demoPath, playerName, steamID string, debug, verbose bool) {
 		log.Fatalf("Error parsing demo: %v", err)
 	}
 
+	mapName := match.MapName
+	if mapName == "" {
+		log.Fatal("Unable to determine map name from demo file")
+	}
+	fmt.Printf("Map detected in demo: %s\n", mapName)
+
+	// Step 2: Locate and load the correct VPK file
+	cs2Path := p.GetCS2Path()
+	mapVPKPath := filepath.Join(cs2Path, "maps", mapName+".vpk")
+	bspLoader := parser.NewBSPLoader(cs2Path)
+
+	var bspChecker *parser.BSPVisibilityChecker
+	if fileExists(mapVPKPath) {
+		// Use map-specific VPK
+		fmt.Printf("Using map-specific VPK: %s\n", mapVPKPath)
+		bspChecker, err = bspLoader.LoadBSPFromSpecificVPK(mapVPKPath, mapName)
+	} else {
+		// Fallback to pak01_dir.vpk
+		fmt.Println("Map-specific VPK not found; falling back to pak01_dir.vpk")
+		bspChecker, err = bspLoader.LoadBSPForMap(mapName)
+	}
+
+	if err != nil {
+		log.Fatalf("Failed to load BSP for map %s: %v", mapName, err)
+	}
+	p.SetBSPChecker(bspChecker)
+	fmt.Printf("Successfully loaded BSP data for map: %s\n", mapName)
+
+	// Step 3: Analyze the parsed match data
 	a := analyzer.NewAnalyzer()
 	stats := a.AnalyzeMatch(match, playerName, steamID, verbose)
 	if stats == nil {
 		log.Fatal("Player not found in demo")
 	}
 
-	// Display Leetify metrics and score
+	// Step 4: Display the results
 	displayLeetifyMetrics(stats, match, playerName, verbose)
 
+	// Step 5: Generate coaching advice
 	c := coach.NewCoach()
 	advice, err := c.GetAdvice(stats)
 	if err != nil {
@@ -88,6 +180,11 @@ func handleAnalyze(demoPath, playerName, steamID string, debug, verbose bool) {
 
 	fmt.Println("\nCoaching Advice:")
 	fmt.Println(advice)
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func displayLeetifyMetrics(stats *models.AnalyzedStats, match *models.Match, playerName string, verbose bool) {

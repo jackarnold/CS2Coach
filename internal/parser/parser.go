@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/golang/geo/r3"
@@ -110,9 +111,11 @@ func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
 	p.match = models.NewMatch()
 	p.registerEventHandlers(debug)
 
-	fmt.Println("Starting demo parse...")
-	err = p.parser.ParseToEnd()
-	if err != nil {
+	if debug {
+		fmt.Println("Starting demo parse...")
+	}
+
+	if err := p.parser.ParseToEnd(); err != nil {
 		return nil, fmt.Errorf("parse error: %v", err)
 	}
 
@@ -121,20 +124,50 @@ func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
 		if debug {
 			fmt.Println("Warning: Could not determine map name")
 		}
+		return p.match, nil
 	}
 
-	// Initialize BSP checker after getting map name
-	if p.match.MapName != "" {
-		bspChecker, err := NewBSPVisibilityChecker(p.match.MapName)
-		if err != nil && debug {
-			fmt.Printf("Warning: Failed to load BSP data: %v\n", err)
-		} else {
-			p.bspChecker = bspChecker
+	// Find CS2 path and load BSP data
+	cs2Path := p.GetCS2Path()
+	if cs2Path == "" {
+		if debug {
+			fmt.Println("Warning: Could not locate CS2 installation")
+		}
+		return p.match, nil
+	}
+
+	loader := NewBSPLoader(cs2Path)
+	bspChecker, err := loader.LoadBSPForMap(p.match.MapName)
+	if err != nil {
+		if debug {
+			fmt.Printf("Warning: Failed to load BSP data for map %s: %v\n",
+				p.match.MapName, err)
+		}
+		return p.match, nil
+	}
+
+	p.bspChecker = bspChecker
+	if debug {
+		fmt.Printf("Successfully loaded BSP data for map %s\n", p.match.MapName)
+		fmt.Printf("Finished parsing. Found %d events\n", len(p.match.Events))
+	}
+
+	return p.match, nil
+}
+
+func (p *Parser) GetCS2Path() string {
+	paths := []string{
+		`C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive\game\csgo`,
+		`C:\Program Files\Steam\steamapps\common\Counter-Strike Global Offensive\game\csgo`,
+	}
+
+	for _, path := range paths {
+		if fileExists(filepath.Join(path, "maps")) {
+			return path
 		}
 	}
 
-	fmt.Printf("Finished parsing. Found %d events\n", len(p.match.Events))
-	return p.match, nil
+	return "" // Path not found
 }
 
 func magnitude(v r3.Vector) float64 {
@@ -344,7 +377,12 @@ func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 
 func (p *Parser) rayVisible(obs PlayerFrameData, tgt PlayerFrameData) bool {
 	if p.bspChecker != nil {
-		if !p.bspChecker.IsVisible(obs.Position, tgt.Position) {
+		visible := p.bspChecker.IsVisible(obs.Position, tgt.Position)
+		fmt.Printf("BSP visibility check from (%v,%v,%v) to (%v,%v,%v): %v\n",
+			obs.Position.X, obs.Position.Y, obs.Position.Z,
+			tgt.Position.X, tgt.Position.Y, tgt.Position.Z,
+			visible)
+		if !visible {
 			return false
 		}
 	}
@@ -842,4 +880,8 @@ func distancePointToLine(point, lineStart, lineEnd r3.Vector) float64 {
 
 	projection := lineStart.Add(line.Mul(t))
 	return point.Sub(projection).Norm()
+}
+
+func (p *Parser) SetBSPChecker(bspChecker *BSPVisibilityChecker) {
+	p.bspChecker = bspChecker
 }
