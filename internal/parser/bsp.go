@@ -111,19 +111,41 @@ func (b *BSPVisibilityChecker) LoadSource2MapFiles(mapDir string) error {
 	vwrldPath := filepath.Join(mapDir, "world.vwrld_c")
 	vphysPath := filepath.Join(mapDir, "world_physics.vphys_c")
 
-	fmt.Printf("Loading visibility file: %s\n", vvisPath)
+	// Initialize minimal BSP data for visibility checking
+	b.bspData = &BSPData{
+		Nodes:  make([]Node, 1),  // At least one root node
+		Planes: make([]Plane, 1), // Corresponding plane
+		Leaves: make([]Leaf, 1),  // At least one leaf
+	}
 
-	// Check and load visibility data
+	// Initialize default values for visibility checking
+	b.bspData.Nodes[0] = Node{
+		PlaneNum: 0,
+		Children: [2]int32{-1, -1}, // Both point to first leaf
+	}
+
+	b.bspData.Planes[0] = Plane{
+		Normal:   Vector3{0, 0, 1},
+		Distance: 0,
+	}
+
+	b.bspData.Leaves[0] = Leaf{
+		Contents: 0, // Non-solid
+	}
+
+	// Load visibility data
 	if err := b.LoadVVISData(vvisPath); err != nil {
 		return fmt.Errorf("failed to load visibility data: %v", err)
 	}
 
-	// Optionally load additional files for advanced features
-	if _, err := os.Stat(vwrldPath); err == nil {
-		b.worldData, _ = os.ReadFile(vwrldPath)
+	// Load world data
+	if worldData, err := os.ReadFile(vwrldPath); err == nil {
+		b.worldData = worldData
 	}
-	if _, err := os.Stat(vphysPath); err == nil {
-		b.physicsData, _ = os.ReadFile(vphysPath)
+
+	// Load physics data
+	if physData, err := os.ReadFile(vphysPath); err == nil {
+		b.physicsData = physData
 	}
 
 	return nil
@@ -479,6 +501,11 @@ func extractBSPFromVPK(vpkPath, mapName, outputDir string) error {
 }
 
 func (b *BSPVisibilityChecker) IsVisible(from, to r3.Vector) bool {
+	if b.bspData == nil {
+		fmt.Println("[DEBUG] IsVisible(): bspData is nil, returning false")
+		return false
+	}
+
 	// Convert to Vector3 for BSP functions
 	start := Vector3{float32(from.X), float32(from.Y), float32(from.Z)}
 	end := Vector3{float32(to.X), float32(to.Y), float32(to.Z)}
@@ -487,20 +514,24 @@ func (b *BSPVisibilityChecker) IsVisible(from, to r3.Vector) bool {
 	distance := direction.Norm()
 
 	// Debug line
-	fmt.Printf("[DEBUG] IsVisible() from=(%.1f, %.1f, %.1f) to=(%.1f, %.1f, %.1f), dist=%.1f\n",
-		from.X, from.Y, from.Z,
-		to.X, to.Y, to.Z,
-		distance)
+	/*fmt.Printf("[DEBUG] IsVisible() from=(%.1f, %.1f, %.1f) to=(%.1f, %.1f, %.1f), dist=%.1f\n",
+	from.X, from.Y, from.Z,
+	to.X, to.Y, to.Z,
+	distance)*/
 
-	// Simple cutoff for large distances
 	if distance > 2000 {
-		fmt.Println("[DEBUG] IsVisible(): distance > 2000, returning false")
+		//fmt.Println("[DEBUG] IsVisible(): distance > 2000, returning false")
 		return false
 	}
 
 	// Check if either point is in a solid leaf
 	startLeaf := b.bspData.findLeaf(start, 0)
 	endLeaf := b.bspData.findLeaf(end, 0)
+
+	if startLeaf == nil || endLeaf == nil {
+		fmt.Println("[DEBUG] IsVisible(): start or end leaf is nil, returning false")
+		return false
+	}
 
 	if startLeaf.Contents&1 != 0 || endLeaf.Contents&1 != 0 {
 		fmt.Println("[DEBUG] IsVisible(): start or end in solid leaf, returning false")
@@ -509,7 +540,7 @@ func (b *BSPVisibilityChecker) IsVisible(from, to r3.Vector) bool {
 
 	// Trace line through BSP tree
 	result := b.bspData.CheckLineOfSight(start, end)
-	fmt.Printf("[DEBUG] IsVisible(): final line-of-sight result = %v\n", result)
+	//fmt.Printf("[DEBUG] IsVisible(): final line-of-sight result = %v\n", result)
 	return result
 }
 

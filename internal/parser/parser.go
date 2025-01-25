@@ -524,10 +524,10 @@ func (p *Parser) rayVisible(obs PlayerFrameData, tgt PlayerFrameData) bool {
 
 	// Check visibility using BSP checker
 	visible := p.BspChecker.IsVisible(obs.Position, tgt.Position)
-	if p.debug {
+	/*if p.debug {
 		fmt.Printf("[DEBUG] rayVisible: from (%v) to (%v), bspChecker says: %v\n",
 			obs.Position, tgt.Position, visible)
-	}
+	}*/
 	if !visible {
 		return false
 	}
