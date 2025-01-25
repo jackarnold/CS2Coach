@@ -160,6 +160,7 @@ func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
 		if debug {
 			fmt.Printf("[DEBUG] Warning: Failed to load BSP data for map %s: %v\n", p.match.MapName, err)
 		}
+		// Continue parsing without BSP data
 	} else {
 		p.BspChecker = bspChecker
 		if debug {
@@ -167,16 +168,12 @@ func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
 		}
 	}
 
-	// Step 3: Resume full parsing if BSP is loaded
-	if p.BspChecker != nil {
-		if debug {
-			fmt.Println("[DEBUG] Resuming full parsing with BSP loaded...")
-		}
-		if err := p.parser.ParseToEnd(); err != nil {
-			return nil, fmt.Errorf("error during full parsing: %v", err)
-		}
-	} else if debug {
-		fmt.Println("[DEBUG] Skipping further event processing: BSP not loaded")
+	// Step 3: Resume parsing events
+	if debug {
+		fmt.Println("[DEBUG] Resuming full parsing...")
+	}
+	if err := p.parser.ParseToEnd(); err != nil {
+		return nil, fmt.Errorf("error during full parsing: %v", err)
 	}
 
 	if debug {
@@ -419,14 +416,6 @@ func (p *Parser) handleFrameDone(e events.FrameDone) {
 }
 
 func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
-	// Skip processing until map data (bspChecker) is loaded
-	if !p.IsReady() {
-		if p.debug {
-			fmt.Printf("[DEBUG] Skipping event processing: bspChecker not initialized (tick %d)\n", gs.IngameTick())
-		}
-		return
-	}
-
 	p.currentTick = gs.IngameTick()
 
 	// Ensure frame-level processing happens only once per tick
@@ -440,10 +429,6 @@ func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 		Players:       []PlayerFrameData{},
 		VisibilityMap: map[uint64]map[uint64]bool{},
 	}
-
-	// Aggregation maps for visibility and spotted events
-	visibilityStats := make(map[uint64]int)
-	spottedStats := make(map[uint64]int)
 
 	// Gather data for each player
 	for _, player := range gs.Participants().Playing() {
@@ -460,50 +445,43 @@ func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 		frameData.Players = append(frameData.Players, pFrame)
 	}
 
-	// Perform custom geometry checks for each (observer, target)
-	for i := range frameData.Players {
-		obs := frameData.Players[i]
-		if !obs.IsAlive {
-			continue
-		}
-
-		if _, ok := frameData.VisibilityMap[obs.SteamID]; !ok {
-			frameData.VisibilityMap[obs.SteamID] = map[uint64]bool{}
-		}
-
-		for j := range frameData.Players {
-			tgt := frameData.Players[j]
-			if obs.SteamID == tgt.SteamID || !tgt.IsAlive {
+	// Perform visibility checks only if BSP is loaded
+	if p.BspChecker != nil {
+		for i := range frameData.Players {
+			obs := frameData.Players[i]
+			if !obs.IsAlive {
 				continue
 			}
 
-			visible := p.rayVisible(obs, tgt)
+			if _, ok := frameData.VisibilityMap[obs.SteamID]; !ok {
+				frameData.VisibilityMap[obs.SteamID] = map[uint64]bool{}
+			}
 
-			if visible {
-				if _, ok := p.enemySpottedTime[obs.SteamID]; !ok {
-					p.enemySpottedTime[obs.SteamID] = make(map[uint64]int)
+			for j := range frameData.Players {
+				tgt := frameData.Players[j]
+				if obs.SteamID == tgt.SteamID || !tgt.IsAlive {
+					continue
 				}
 
-				if _, alreadySpotted := p.enemySpottedTime[obs.SteamID][tgt.SteamID]; !alreadySpotted {
-					p.enemySpottedTime[obs.SteamID][tgt.SteamID] = p.currentTick
-					spottedStats[obs.SteamID]++
-					if p.debug {
-						fmt.Printf("[DEBUG] Player %d spotted %d at tick %d\n", obs.SteamID, tgt.SteamID, p.currentTick)
+				visible := p.rayVisible(obs, tgt)
+
+				if visible {
+					if _, ok := p.enemySpottedTime[obs.SteamID]; !ok {
+						p.enemySpottedTime[obs.SteamID] = make(map[uint64]int)
+					}
+
+					if _, alreadySpotted := p.enemySpottedTime[obs.SteamID][tgt.SteamID]; !alreadySpotted {
+						p.enemySpottedTime[obs.SteamID][tgt.SteamID] = p.currentTick
+						if p.debug {
+							fmt.Printf("[DEBUG] Player %d spotted %d at tick %d\n", obs.SteamID, tgt.SteamID, p.currentTick)
+						}
 					}
 				}
+				frameData.VisibilityMap[obs.SteamID][tgt.SteamID] = visible
 			}
-			frameData.VisibilityMap[obs.SteamID][tgt.SteamID] = visible
 		}
-	}
-
-	// Log aggregated stats at intervals
-	if p.debug && p.currentTick%500 == 0 {
-		fmt.Printf("[DEBUG] Visibility stats summary at tick %d: %+v\n", p.currentTick, visibilityStats)
-		fmt.Printf("[DEBUG] Spotted stats summary at tick %d: %+v\n", p.currentTick, spottedStats)
-
-		// Reset the aggregation maps after logging
-		visibilityStats = make(map[uint64]int)
-		spottedStats = make(map[uint64]int)
+	} else if p.debug {
+		fmt.Printf("[DEBUG] BSPChecker not initialized; skipping visibility checks for tick %d\n", p.currentTick)
 	}
 
 	// Store frameData in p.frameStorage
