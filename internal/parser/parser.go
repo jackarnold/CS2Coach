@@ -71,6 +71,7 @@ type Parser struct {
 	visibilityStats    map[uint64]int
 	spottedStats       map[uint64]int
 	mapNameFound       bool
+	sprayThreshold     time.Duration
 }
 
 func NewParser(debug bool) *Parser {
@@ -92,6 +93,7 @@ func NewParser(debug bool) *Parser {
 		lastProcessedTick:  -1,
 		frameStorage:       FrameStorage{},
 		mapNameFound:       false,
+		sprayThreshold:     200 * time.Millisecond,
 	}
 }
 
@@ -100,6 +102,16 @@ func (p *Parser) IsReady() bool {
 }
 
 func (p *Parser) GetOrCreatePlayerStats(steamID uint64, name string) *models.PlayerStats {
+	if steamID == 0 {
+		log.Printf("[ERROR] GetOrCreatePlayerStats called with invalid SteamID: 0")
+		return nil
+	}
+
+	_, exists := p.match.PlayerStats[steamID]
+	if !exists {
+		log.Printf("[INFO] Creating new PlayerStats for SteamID: %d, Name: %s", steamID, name)
+	}
+
 	stats := p.match.GetOrCreatePlayerStats(steamID, name)
 	if stats.TimeToFirstDamage == nil {
 		stats.TimeToFirstDamage = make([]float64, 0)
@@ -802,15 +814,26 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 			fmt.Printf("[DEBUG] handleWeaponFire: %s => EnemySpottedShots incremented to %d\n",
 				e.Shooter.Name, stats.EnemySpottedShots)
 		}
-	}
 
-	// Track spray control
-	// Check if this shot is part of a spray
-	lastFireTime, hadPreviousShot := p.lastWeaponFireTime[shooterID]
-	if hadPreviousShot && currentTime.Sub(lastFireTime) <= 200*time.Millisecond { // Adjust spray threshold as needed
-		stats.SprayShots++
-		if p.debug {
-			fmt.Printf("[DEBUG] Spray shot detected for player %s\n", e.Shooter.Name)
+		// Check spray timing
+		if p.isSprayableWeapon(e.Weapon.Class()) {
+			fmt.Printf("[DEBUG] handleWeaponFire: Weapon %s classified as sprayable\n", e.Weapon.Type)
+			currentTime := time.Now()
+			if p.lastWeaponFireTime[shooterID].Add(p.sprayThreshold).After(currentTime) {
+				p.currentSprayShots[shooterID]++
+			} else {
+				// Reset spray if time gap is too long
+				p.currentSprayShots[shooterID] = 1
+			}
+			p.lastWeaponFireTime[shooterID] = currentTime
+
+			// Count only sprays of 3+ shots
+			if p.currentSprayShots[shooterID] >= 3 {
+				stats.SprayShots++
+				if p.debug {
+					fmt.Printf("[DEBUG] Spray shot detected for player %s\n", e.Shooter.Name)
+				}
+			}
 		}
 	}
 
@@ -873,6 +896,10 @@ func (p *Parser) isLiveGameRound() bool {
 	return !gs.IsWarmupPeriod() && !gs.IsFreezetimePeriod() && gs.TotalRoundsPlayed() >= 0
 }
 
+func (p *Parser) isSprayableWeapon(eq common.EquipmentClass) bool {
+	return eq == common.EqClassRifle || eq == common.EqClassSMG
+}
+
 func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 	if !p.isLiveGameRound() || e.Attacker == nil || e.Player == nil ||
 		e.Attacker.SteamID64 == 0 || e.Player.SteamID64 == 0 {
@@ -901,10 +928,13 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 		p.lastDamageBy[victimID][e.Attacker.SteamID64] += actualDamage
 
 		// Check if this hit was part of a spray
-		if p.lastWeaponFireTime[e.Attacker.SteamID64].Add(200 * time.Millisecond).After(time.Now()) { // Adjust spray window
-			stats.SprayHits++
-			if p.debug {
-				fmt.Printf("[DEBUG] Spray hit detected for player %s\n", e.Attacker.Name)
+		if p.isSprayableWeapon(e.Weapon.Class()) {
+			fmt.Printf("[DEBUG] handlePlayerHurt: Weapon %s classified as sprayable\n", e.Weapon.Type)
+			if p.currentSprayShots[e.Attacker.SteamID64] >= 3 {
+				stats.SprayHits++
+				if p.debug {
+					fmt.Printf("[DEBUG] Spray hit detected for player %s\n", e.Attacker.Name)
+				}
 			}
 		}
 
@@ -965,6 +995,13 @@ func (p *Parser) handleRoundEnd(e events.RoundEnd) {
 		if p.debug {
 			fmt.Printf("[DEBUG] End of round stats for %s: K/D/A: %d/%d/%d, TotalDamage: %d\n",
 				stats.Name, stats.Kills, stats.Deaths, stats.Assists, stats.TotalDamage)
+
+			if stats.SprayShots > 0 {
+				sprayAccuracy := float64(stats.SprayHits) / float64(stats.SprayShots) * 100
+				fmt.Printf("[DEBUG] Player %s Spray Accuracy: %.2f%%\n", stats.Name, sprayAccuracy)
+			} else {
+				fmt.Printf("[DEBUG] Player %s Spray Accuracy: No spray shots recorded\n", stats.Name)
+			}
 		}
 
 		if stats.IsAlive {
