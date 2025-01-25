@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 
 	"github.com/richardkiene/CS2Coach/internal/analyzer"
-	"github.com/richardkiene/CS2Coach/internal/coach"
 	"github.com/richardkiene/CS2Coach/internal/ml"
 	"github.com/richardkiene/CS2Coach/internal/models"
 	"github.com/richardkiene/CS2Coach/internal/parser"
@@ -96,9 +95,9 @@ func handleAnalyze(demoPath, playerName, steamID string, debug, verbose bool) {
 		log.Fatal("Please provide either player name or Steam ID")
 	}
 
-	// Step 1: Parse the demo to get the map name
+	// Step 1: Parse demo to determine the map name
 	p := parser.NewParser(debug)
-	fmt.Printf("Parsing demo file: %s\n", demoPath)
+	fmt.Printf("Parsing demo file to determine map: %s\n", demoPath)
 	match, err := p.ParseDemo(demoPath, debug)
 	if err != nil {
 		log.Fatalf("Error parsing demo: %v", err)
@@ -110,41 +109,15 @@ func handleAnalyze(demoPath, playerName, steamID string, debug, verbose bool) {
 	}
 	fmt.Printf("Map detected in demo: %s\n", mapName)
 
-	// Step 2: Locate and load the correct map files
-	//cs2Path := p.GetCS2Path()
-	//mapDir := filepath.Join(cs2Path, "maps", mapName)
-	tempDir := filepath.Join(os.TempDir(), "cs2coach_bsp", "maps", mapName)
-	fmt.Printf("Using extracted map files from: %s\n", tempDir)
-
-	bspChecker := &parser.BSPVisibilityChecker{}
-
-	if err := bspChecker.LoadSource2MapFiles(tempDir); err != nil {
-		log.Fatalf("Failed to load visibility data for map %s: %v", mapName, err)
-	}
-
-	// Attach the visibility checker to the parser
-	p.SetBSPChecker(bspChecker)
-	fmt.Printf("Successfully loaded visibility data for map: %s\n", mapName)
-
-	// Step 3: Analyze the parsed match data
+	// Step 2: Analyze the parsed match data
 	a := analyzer.NewAnalyzer()
 	stats := a.AnalyzeMatch(match, playerName, steamID, verbose)
 	if stats == nil {
 		log.Fatal("Player not found in demo")
 	}
 
-	// Step 4: Display the results
+	// Step 3: Display the results
 	displayLeetifyMetrics(stats, match, playerName, verbose)
-
-	// Step 5: Generate coaching advice
-	c := coach.NewCoach()
-	advice, err := c.GetAdvice(stats)
-	if err != nil {
-		log.Fatalf("Error getting coaching advice: %v", err)
-	}
-
-	fmt.Println("\nCoaching Advice:")
-	fmt.Println(advice)
 }
 
 func fileExists(path string) bool {

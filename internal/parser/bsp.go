@@ -130,13 +130,28 @@ func (b *BSPVisibilityChecker) LoadSource2MapFiles(mapDir string) error {
 }
 
 func (b *BSPVisibilityChecker) LoadVVISData(vvisPath string) error {
+	// Check if the file exists
+	if _, err := os.Stat(vvisPath); os.IsNotExist(err) {
+		return fmt.Errorf("visibility file not found: %s", vvisPath)
+	}
+
+	// Attempt to read the file
 	data, err := os.ReadFile(vvisPath)
 	if err != nil {
-		return fmt.Errorf("failed to read visibility data: %v", err)
+		return fmt.Errorf("failed to read visibility data from %s: %v", vvisPath, err)
+	}
+
+	// Validate the data (e.g., size or format)
+	if len(data) < 1 {
+		return fmt.Errorf("visibility data in %s is empty or invalid", vvisPath)
 	}
 
 	// Parse visibility data (adjust parsing logic for Source 2 as needed)
 	b.visibilityData = data
+
+	// Debug log (optional)
+	fmt.Printf("[DEBUG] Successfully loaded visibility data from: %s\n", vvisPath)
+
 	return nil
 }
 
@@ -461,22 +476,34 @@ func (b *BSPVisibilityChecker) IsVisible(from, to r3.Vector) bool {
 	start := Vector3{float32(from.X), float32(from.Y), float32(from.Z)}
 	end := Vector3{float32(to.X), float32(to.Y), float32(to.Z)}
 
-	// First check basic frustum
 	direction := to.Sub(from)
 	distance := direction.Norm()
+
+	// Debug line
+	fmt.Printf("[DEBUG] IsVisible() from=(%.1f, %.1f, %.1f) to=(%.1f, %.1f, %.1f), dist=%.1f\n",
+		from.X, from.Y, from.Z,
+		to.X, to.Y, to.Z,
+		distance)
+
+	// Simple cutoff for large distances
 	if distance > 2000 {
+		fmt.Println("[DEBUG] IsVisible(): distance > 2000, returning false")
 		return false
 	}
 
 	// Check if either point is in a solid leaf
 	startLeaf := b.bspData.findLeaf(start, 0)
 	endLeaf := b.bspData.findLeaf(end, 0)
+
 	if startLeaf.Contents&1 != 0 || endLeaf.Contents&1 != 0 {
+		fmt.Println("[DEBUG] IsVisible(): start or end in solid leaf, returning false")
 		return false
 	}
 
 	// Trace line through BSP tree
-	return b.bspData.CheckLineOfSight(start, end)
+	result := b.bspData.CheckLineOfSight(start, end)
+	fmt.Printf("[DEBUG] IsVisible(): final line-of-sight result = %v\n", result)
+	return result
 }
 
 func readLumpData(r io.Reader, offset int64, size int) ([]byte, error) {

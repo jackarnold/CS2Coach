@@ -40,17 +40,18 @@ type SpottedState struct {
 }
 
 type Parser struct {
-	debug              bool
-	match              *models.Match
-	parser             dem.Parser
-	lastKillTime       *time.Time
-	lastKillVictim     uint64
-	lastKillKiller     *models.PlayerStats
-	roundStartTime     time.Time
-	sprayStartTime     map[uint64]time.Time
-	currentSprayShots  map[uint64]int
-	enemySpottedTime   map[uint64]map[uint64]time.Time
-	firstDamageTime    map[uint64]map[uint64]time.Time
+	debug             bool
+	match             *models.Match
+	parser            dem.Parser
+	lastKillTime      *time.Time
+	lastKillVictim    uint64
+	lastKillKiller    *models.PlayerStats
+	roundStartTime    time.Time
+	sprayStartTime    map[uint64]time.Time
+	currentSprayShots map[uint64]int
+	// Map of attacker -> (victim -> time that victim was first spotted this round)
+	enemySpottedTime   map[uint64]map[uint64]int
+	firstDamageTime    map[uint64]map[uint64]int
 	alivePlayersByTeam map[int]int
 	currentRoundKills  map[uint64]map[int]int
 	lastWeaponFireTime map[uint64]time.Time
@@ -62,8 +63,13 @@ type Parser struct {
 	smokePositions     []r3.Vector          // Track active smoke positions
 	flashedPlayers     map[uint64]time.Time // Track flashed players
 	frameStorage       FrameStorage
-	bspChecker         *BSPVisibilityChecker
+	BspChecker         *BSPVisibilityChecker
 	warnedBspChecker   bool // Tracks if the warning has been logged
+	lastProcessedTick  int
+	currentTick        int
+	visibilityStats    map[uint64]int
+	spottedStats       map[uint64]int
+	mapNameFound       bool
 }
 
 func NewParser(debug bool) *Parser {
@@ -75,14 +81,21 @@ func NewParser(debug bool) *Parser {
 		currentRoundKills:  make(map[uint64]map[int]int),
 		sprayStartTime:     make(map[uint64]time.Time),
 		currentSprayShots:  make(map[uint64]int),
-		enemySpottedTime:   make(map[uint64]map[uint64]time.Time),
-		firstDamageTime:    make(map[uint64]map[uint64]time.Time),
+		enemySpottedTime:   make(map[uint64]map[uint64]int),
+		firstDamageTime:    make(map[uint64]map[uint64]int),
 		lastWeaponFireTime: make(map[uint64]time.Time),
 		angleHistory:       make(map[uint64][]float32),
 		lastKnownHP:        make(map[uint64]int),
 		visibilityCache:    make(map[uint64]map[uint64]bool),
 		flashedPlayers:     make(map[uint64]time.Time),
+		lastProcessedTick:  -1,
+		frameStorage:       FrameStorage{},
+		mapNameFound:       false,
 	}
+}
+
+func (p *Parser) IsReady() bool {
+	return p.BspChecker != nil
 }
 
 func (p *Parser) GetOrCreatePlayerStats(steamID uint64, name string) *models.PlayerStats {
@@ -114,41 +127,29 @@ func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
 	p.registerEventHandlers(debug)
 
 	if debug {
-		fmt.Println("Starting demo parse...")
+		fmt.Println("[DEBUG] Starting demo parse...")
 	}
 
-	// Parse the header to get initial map info
-	header, err := p.parser.ParseHeader()
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse demo header: %v", err)
-	}
-
-	// Attempt to extract map name from the header
-	mapName := header.MapName
-	if mapName != "" {
-		p.match.MapName = mapName
-		if debug {
-			fmt.Printf("Map detected from demo header: %s\n", mapName)
+	// Step 1: Parse until the map name is found
+	for !p.mapNameFound {
+		moreFrames, err := p.parser.ParseNextFrame() // Parse the next frame to process events
+		if err != nil || !moreFrames {
+			if err == dem.ErrUnexpectedEndOfDemo {
+				return nil, fmt.Errorf("unable to determine map name from demo file")
+			}
+			return nil, fmt.Errorf("error during initial parsing: %v", err)
 		}
-	} else if debug {
-		fmt.Println("Map name not found in demo header; will attempt to extract from events.")
 	}
 
-	// Parse events to potentially populate the map name if not found in the header
-	if err := p.parser.ParseToEnd(); err != nil {
-		return nil, fmt.Errorf("parse error: %v", err)
+	if debug {
+		fmt.Printf("[DEBUG] Map name detected: %s\n", p.match.MapName)
 	}
 
-	// Confirm the map name is populated
-	if p.match.MapName == "" {
-		return nil, fmt.Errorf("unable to determine map name from demo file")
-	}
-
-	// Load BSP data
+	// Step 2: Load BSP data
 	cs2Path := p.GetCS2Path()
 	if cs2Path == "" {
 		if debug {
-			fmt.Println("Warning: Could not locate CS2 installation")
+			fmt.Println("[DEBUG] Warning: Could not locate CS2 installation")
 		}
 		return p.match, nil
 	}
@@ -157,20 +158,51 @@ func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
 	bspChecker, err := loader.LoadBSPForMap(p.match.MapName)
 	if err != nil {
 		if debug {
-			fmt.Printf("Warning: Failed to load BSP data for map %s: %v\n", p.match.MapName, err)
+			fmt.Printf("[DEBUG] Warning: Failed to load BSP data for map %s: %v\n", p.match.MapName, err)
 		}
 	} else {
-		p.bspChecker = bspChecker
+		p.BspChecker = bspChecker
 		if debug {
-			fmt.Printf("Successfully loaded BSP data for map %s\n", p.match.MapName)
+			fmt.Printf("[DEBUG] Successfully loaded BSP data for map %s\n", p.match.MapName)
 		}
+	}
+
+	// Step 3: Resume full parsing if BSP is loaded
+	if p.BspChecker != nil {
+		if debug {
+			fmt.Println("[DEBUG] Resuming full parsing with BSP loaded...")
+		}
+		if err := p.parser.ParseToEnd(); err != nil {
+			return nil, fmt.Errorf("error during full parsing: %v", err)
+		}
+	} else if debug {
+		fmt.Println("[DEBUG] Skipping further event processing: BSP not loaded")
 	}
 
 	if debug {
-		fmt.Printf("Finished parsing. Found %d events\n", len(p.match.Events))
+		fmt.Printf("[DEBUG] Finished parsing. Found %d events in total.\n", len(p.match.Events))
 	}
 
 	return p.match, nil
+}
+
+func (p *Parser) extractMapName(debug bool) (bool, *models.Match, error) {
+	header, err := p.parser.ParseHeader()
+	if err != nil {
+		return true, nil, fmt.Errorf("failed to parse demo header: %v", err)
+	}
+
+	// Attempt to extract map name from the header
+	mapName := header.MapName
+	if mapName != "" {
+		p.match.MapName = mapName
+		if debug {
+			fmt.Printf("[DEBUG] Map detected from demo header: %s\n", mapName)
+		}
+	} else if debug {
+		fmt.Println("[DEBUG] Map name not found in demo header; will attempt to extract from events.")
+	}
+	return false, nil, nil
 }
 
 func (p *Parser) GetCS2Path() string {
@@ -207,8 +239,8 @@ func (p *Parser) registerEventHandlers(debug bool) {
 func (p *Parser) handleRoundStart(e events.RoundStart) {
 	// Reset round-specific data
 	p.lastKnownHP = make(map[uint64]int)
-	p.enemySpottedTime = make(map[uint64]map[uint64]time.Time)
-	p.firstDamageTime = make(map[uint64]map[uint64]time.Time)
+	p.enemySpottedTime = make(map[uint64]map[uint64]int)
+	p.firstDamageTime = make(map[uint64]map[uint64]int)
 	p.flashedPlayers = make(map[uint64]time.Time)
 	p.smokePositions = []r3.Vector{}
 
@@ -221,13 +253,19 @@ func (p *Parser) handleRoundStart(e events.RoundStart) {
 		stats := p.match.GetOrCreatePlayerStats(player.SteamID64, player.Name)
 		stats.IsAlive = true
 		stats.RoundsActive++
+		if p.debug {
+			fmt.Printf("[DEBUG] handleRoundStart: Player %s (SteamID: %d), RoundsActive => %d\n",
+				player.Name, player.SteamID64, stats.RoundsActive)
+		}
 
 		// Initialize HP to 100 for all players
 		p.lastKnownHP[player.SteamID64] = 100
 	}
 
 	if p.debug {
-		fmt.Printf("Round %d started at tick %d\n", p.parser.GameState().TotalRoundsPlayed(), p.parser.GameState().IngameTick())
+		fmt.Printf("[DEBUG] Round %d started at tick %d\n",
+			p.parser.GameState().TotalRoundsPlayed(),
+			p.parser.GameState().IngameTick())
 	}
 
 	// Add round_start event to match events
@@ -253,9 +291,13 @@ func (p *Parser) handleFlashEvent(e events.PlayerFlashed) {
 }
 
 func (p *Parser) handleServerInfo(msg *msgs2.CSVCMsg_ServerInfo) {
-	p.match.MapName = msg.GetMapName()
-	if p.debug {
-		fmt.Printf("Map name detected from server info: %s\n", p.match.MapName)
+	mapName := msg.GetMapName()
+	if !p.mapNameFound && mapName != "" {
+		p.match.MapName = mapName
+		p.mapNameFound = true
+		if p.debug {
+			fmt.Printf("[DEBUG] Map name detected from server info: %s\n", p.match.MapName)
+		}
 	}
 }
 
@@ -278,7 +320,7 @@ func (p *Parser) handleKill(e events.Kill) {
 	}
 
 	if p.debug {
-		fmt.Printf("Kill Event: %s killed %s (Round: %d, IsLive: %v)\n",
+		fmt.Printf("[DEBUG] Kill Event: %s killed %s (Round: %d, IsLive: %v)\n",
 			e.Killer.Name, e.Victim.Name,
 			p.parser.GameState().TotalRoundsPlayed(),
 			!p.parser.GameState().IsWarmupPeriod() && !p.parser.GameState().IsFreezetimePeriod())
@@ -377,12 +419,31 @@ func (p *Parser) handleFrameDone(e events.FrameDone) {
 }
 
 func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
-	currentTick := gs.IngameTick()
+	// Skip processing until map data (bspChecker) is loaded
+	if !p.IsReady() {
+		if p.debug {
+			fmt.Printf("[DEBUG] Skipping event processing: bspChecker not initialized (tick %d)\n", gs.IngameTick())
+		}
+		return
+	}
+
+	p.currentTick = gs.IngameTick()
+
+	// Ensure frame-level processing happens only once per tick
+	if p.lastProcessedTick == p.currentTick {
+		return
+	}
+	p.lastProcessedTick = p.currentTick
+
 	frameData := FrameData{
-		Tick:          currentTick,
+		Tick:          p.currentTick,
 		Players:       []PlayerFrameData{},
 		VisibilityMap: map[uint64]map[uint64]bool{},
 	}
+
+	// Aggregation maps for visibility and spotted events
+	visibilityStats := make(map[uint64]int)
+	spottedStats := make(map[uint64]int)
 
 	// Gather data for each player
 	for _, player := range gs.Participants().Playing() {
@@ -399,14 +460,13 @@ func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 		frameData.Players = append(frameData.Players, pFrame)
 	}
 
-	// Now do a custom geometry check for each (observer, target)
+	// Perform custom geometry checks for each (observer, target)
 	for i := range frameData.Players {
 		obs := frameData.Players[i]
 		if !obs.IsAlive {
 			continue
 		}
 
-		// Initialize the observer's map
 		if _, ok := frameData.VisibilityMap[obs.SteamID]; !ok {
 			frameData.VisibilityMap[obs.SteamID] = map[uint64]bool{}
 		}
@@ -417,30 +477,84 @@ func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 				continue
 			}
 
-			// Our custom check: can obs see any part of tgt's bounding box?
-			// For a simple approach, do a ray from obs.Position to tgt.Position
 			visible := p.rayVisible(obs, tgt)
+
+			if visible {
+				if _, ok := p.enemySpottedTime[obs.SteamID]; !ok {
+					p.enemySpottedTime[obs.SteamID] = make(map[uint64]int)
+				}
+
+				if _, alreadySpotted := p.enemySpottedTime[obs.SteamID][tgt.SteamID]; !alreadySpotted {
+					p.enemySpottedTime[obs.SteamID][tgt.SteamID] = p.currentTick
+					spottedStats[obs.SteamID]++
+					if p.debug {
+						fmt.Printf("[DEBUG] Player %d spotted %d at tick %d\n", obs.SteamID, tgt.SteamID, p.currentTick)
+					}
+				}
+			}
 			frameData.VisibilityMap[obs.SteamID][tgt.SteamID] = visible
 		}
 	}
 
-	// Finally, store fd in p.frameStorage
+	// Log aggregated stats at intervals
+	if p.debug && p.currentTick%500 == 0 {
+		fmt.Printf("[DEBUG] Visibility stats summary at tick %d: %+v\n", p.currentTick, visibilityStats)
+		fmt.Printf("[DEBUG] Spotted stats summary at tick %d: %+v\n", p.currentTick, spottedStats)
+
+		// Reset the aggregation maps after logging
+		visibilityStats = make(map[uint64]int)
+		spottedStats = make(map[uint64]int)
+	}
+
+	// Store frameData in p.frameStorage
 	p.frameStorage.frames = append(p.frameStorage.frames, frameData)
 }
 
-func (p *Parser) rayVisible(obs PlayerFrameData, tgt PlayerFrameData) bool {
-	if p.bspChecker != nil {
-		visible := p.bspChecker.IsVisible(obs.Position, tgt.Position)
-		fmt.Printf("Visibility check from (%v) to (%v): %v\n", obs.Position, tgt.Position, visible)
-		fmt.Printf("Source 2 visibility check from (%v,%v,%v) to (%v,%v,%v): %v\n",
-			obs.Position.X, obs.Position.Y, obs.Position.Z,
-			tgt.Position.X, tgt.Position.Y, tgt.Position.Z,
-			visible)
-		if !visible {
-			return false
-		}
+func (p *Parser) InitializeParser(demoFile string, debug bool) error {
+	// Load the BSP data for the map
+	if err := p.loadBspData(debug); err != nil {
+		return fmt.Errorf("failed to load BSP data: %w", err)
 	}
 
+	fmt.Println("[INFO] BSP data loaded successfully.")
+	return nil
+}
+
+func (p *Parser) loadBspData(debug bool) error {
+	_, _, mapName := p.extractMapName(debug) // Assuming you have a method to get the map name
+	bspPath := fmt.Sprintf("maps/%s", mapName)
+
+	// Initialize the BSP checker
+	var err error
+	p.BspChecker, err = NewBSPVisibilityChecker(bspPath) // Replace with your BSP loader logic
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *Parser) rayVisible(obs PlayerFrameData, tgt PlayerFrameData) bool {
+	// Ensure BSP is initialized before performing visibility checks
+	if p.BspChecker == nil {
+		if p.debug && !p.warnedBspChecker {
+			fmt.Println("[DEBUG] Warning: BSP file not loaded, skipping visibility checks in rayVisible.")
+			p.warnedBspChecker = true
+		}
+		// Return false or allow fallback logic based on your use case
+		return false
+	}
+
+	// Check visibility using BSP checker
+	visible := p.BspChecker.IsVisible(obs.Position, tgt.Position)
+	if p.debug {
+		fmt.Printf("[DEBUG] rayVisible: from (%v) to (%v), bspChecker says: %v\n",
+			obs.Position, tgt.Position, visible)
+	}
+	if !visible {
+		return false
+	}
+
+	// Additional checks for smoke and flash
 	if p.isLineInSmoke(obs.Position, tgt.Position) || p.isPlayerFlashed(obs.SteamID) {
 		return false
 	}
@@ -472,11 +586,8 @@ func calcAngleBetween(from, to r3.Vector) float32 {
 	deltaX := to.X - from.X
 	deltaY := to.Y - from.Y
 
-	// We'll ignore Z for the horizontal angle
-	// TODO: Should we consider Z for vertical angle?
 	angleRad := math.Atan2(float64(deltaY), float64(deltaX))
 	angleDeg := angleRad * 180.0 / math.Pi
-
 	return float32(angleDeg)
 }
 
@@ -561,8 +672,7 @@ func (p *Parser) handleTrade(e events.Kill) {
 	}
 }
 
-// TODO: This function is being treated as utility stats only but I am fairly sure that's not all we should be tracking.
-// -- handlePlayerHurt also tracks this event and really these should be consolidated
+// handleActivity is primarily for utility damage, but keep it separate if you plan to expand it
 func (p *Parser) handleActivity(e events.PlayerHurt) {
 	if (!p.isLiveGameRound()) || e.Attacker == nil || e.Player == nil {
 		return
@@ -601,7 +711,12 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 		}
 
 		firstVisibleTick, found := p.findFirstVisibleTick(shooterID, enemy.SteamID64, currentTick, 64)
-		fmt.Printf("Shooter: %s, Target: %s, Visible: %v, SpottedShots: %d\n", e.Shooter.Name, enemy.Name, found, stats.EnemySpottedShots)
+
+		// Debug info
+		if p.debug {
+			fmt.Printf("[DEBUG] Shooter: %s, Target: %s, Visible (within last 64 ticks): %v, EnemySpottedShots: %d\n",
+				e.Shooter.Name, enemy.Name, found, stats.EnemySpottedShots)
+		}
 
 		if found {
 			enemySpotted = true
@@ -609,7 +724,7 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 			stats.TimeToFirstShot = append(stats.TimeToFirstShot, timeInView)
 
 			if p.debug {
-				fmt.Printf("Shooter: %s saw enemy for %.2f seconds before firing. Total spotted shots: %d\n",
+				fmt.Printf("[DEBUG] Shooter: %s saw enemy for %.2f seconds before firing. Next SpottedShots => %d\n",
 					e.Shooter.Name, timeInView, stats.EnemySpottedShots+1)
 			}
 		}
@@ -617,6 +732,10 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 
 	if enemySpotted {
 		stats.EnemySpottedShots++
+		if p.debug {
+			fmt.Printf("[DEBUG] handleWeaponFire: %s => EnemySpottedShots incremented to %d\n",
+				e.Shooter.Name, stats.EnemySpottedShots)
+		}
 	}
 
 	// Track spray shots
@@ -631,9 +750,13 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 		stats.CounterStrafedShots++
 	}
 	stats.Velocity[e.Shooter.Name] = currentVel
+
+	// Update lastWeaponFireTime for trade logic
+	p.lastWeaponFireTime[shooterID] = time.Now()
 }
 
 func (p *Parser) findFirstVisibleTick(attackerID, victimID uint64, currentTick, maxLookback int) (int, bool) {
+	// Search backwards in frameStorage for up to maxLookback ticks
 	for i := len(p.frameStorage.frames) - 1; i >= 0; i-- {
 		fd := p.frameStorage.frames[i]
 		if fd.Tick < currentTick-maxLookback {
@@ -641,6 +764,7 @@ func (p *Parser) findFirstVisibleTick(attackerID, victimID uint64, currentTick, 
 		}
 		if visibleMap, ok := fd.VisibilityMap[attackerID]; ok {
 			if visibleMap[victimID] {
+				// Found a frame where attacker could see victim
 				return fd.Tick, true
 			}
 		}
@@ -654,7 +778,8 @@ func (p *Parser) isLiveGameRound() bool {
 }
 
 func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
-	if !p.isLiveGameRound() || e.Attacker == nil || e.Player == nil || e.Attacker.SteamID64 == 0 || e.Player.SteamID64 == 0 {
+	if !p.isLiveGameRound() || e.Attacker == nil || e.Player == nil ||
+		e.Attacker.SteamID64 == 0 || e.Player.SteamID64 == 0 {
 		return
 	}
 
@@ -669,32 +794,41 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 	oldHP := p.lastKnownHP[victimID]
 	actualDamage := min(e.HealthDamage, oldHP)
 
+	// Count as total damage only if not team damage or self-inflicted
 	if e.Attacker.Team != e.Player.Team && e.Attacker.SteamID64 != e.Player.SteamID64 {
 		stats.TotalDamage += actualDamage
 	}
 
 	p.lastKnownHP[victimID] = max(oldHP-actualDamage, 0)
 
-	// Track time to damage
-	if p.bspChecker != nil {
-		if spottedTime, wasSpotted := p.enemySpottedTime[e.Attacker.SteamID64][victimID]; wasSpotted {
+	// Check if victim was previously spotted
+	if p.BspChecker != nil {
+		if spottedTick, wasSpotted := p.enemySpottedTime[e.Attacker.SteamID64][victimID]; wasSpotted {
+			// Count this as a spotted hit
+			stats.EnemySpottedHits++
+			if p.debug {
+				fmt.Printf("[DEBUG] handlePlayerHurt: %s => EnemySpottedHits incremented to %d\n",
+					e.Attacker.Name, stats.EnemySpottedHits)
+			}
+
+			// Track ticks to first damage
 			if _, alreadyDamaged := p.firstDamageTime[e.Attacker.SteamID64][victimID]; !alreadyDamaged {
-				timeToHit := time.Since(spottedTime).Seconds()
-				stats.TimeToFirstDamage = append(stats.TimeToFirstDamage, timeToHit)
+				ticksToHit := p.currentTick - spottedTick
+				stats.TimeToFirstDamage = append(stats.TimeToFirstDamage, float64(ticksToHit))
 
 				if _, exists := p.firstDamageTime[e.Attacker.SteamID64]; !exists {
-					p.firstDamageTime[e.Attacker.SteamID64] = make(map[uint64]time.Time)
+					p.firstDamageTime[e.Attacker.SteamID64] = make(map[uint64]int)
 				}
-				p.firstDamageTime[e.Attacker.SteamID64][victimID] = time.Now()
+				p.firstDamageTime[e.Attacker.SteamID64][victimID] = p.currentTick
 
 				if p.debug {
-					fmt.Printf("Attacker %s saw victim %s for %.2f seconds before hitting.\n",
-						e.Attacker.Name, e.Player.Name, timeToHit)
+					fmt.Printf("[DEBUG] Attacker %s saw victim %s for %d ticks before hitting.\n",
+						e.Attacker.Name, e.Player.Name, ticksToHit)
 				}
 			}
 		}
 	} else if p.debug && !p.warnedBspChecker {
-		fmt.Println("Warning: bspChecker is nil, skipping visibility checks for damage events.")
+		fmt.Println("[DEBUG] Warning: bspChecker is nil, skipping visibility checks for damage events.")
 		p.warnedBspChecker = true
 	}
 }
@@ -752,7 +886,6 @@ func isQuickPeek(killerPos, victimPos r3.Vector, killerAngle float32) bool {
 
 	angle := float32(math.Atan2(float64(deltaY), float64(deltaX))) * 180 / math.Pi
 	angleDiff := math.Abs(float64(angle - killerAngle))
-
 	return angleDiff <= 45
 }
 
@@ -792,10 +925,8 @@ func (p *Parser) updateSmokes(gameState dem.GameState) {
 func (p *Parser) isLineInSmoke(start, end r3.Vector) bool {
 	for _, smokePos := range p.smokePositions {
 		// Simple smoke check - if line passes within smoke radius
-		smokeRadius := 144.0 // Source engine units
+		smokeRadius := 144.0
 
-		// Check if line segment intersects with smoke sphere
-		// Using simplified distance check for performance
 		distToLine := distancePointToLine(smokePos, start, end)
 		if distToLine < smokeRadius {
 			return true
@@ -807,12 +938,12 @@ func (p *Parser) isLineInSmoke(start, end r3.Vector) bool {
 func distancePointToLine(point, lineStart, lineEnd r3.Vector) float64 {
 	// Calculate distance from point to line segment
 	line := lineEnd.Sub(lineStart)
-	len := line.Norm()
-	if len == 0 {
+	length := line.Norm()
+	if length == 0 {
 		return point.Sub(lineStart).Norm()
 	}
 
-	t := point.Sub(lineStart).Dot(line) / (len * len)
+	t := point.Sub(lineStart).Dot(line) / (length * length)
 	t = math.Max(0, math.Min(1, t))
 
 	projection := lineStart.Add(line.Mul(t))
@@ -821,13 +952,27 @@ func distancePointToLine(point, lineStart, lineEnd r3.Vector) float64 {
 
 func (p *Parser) SetBSPChecker(bspChecker *BSPVisibilityChecker) {
 	if bspChecker == nil {
-		fmt.Println("Warning: BSPChecker is nil.")
+		fmt.Println("[DEBUG] Warning: BSPChecker is nil.")
 	} else {
-		fmt.Println("BSPChecker successfully initialized.")
+		fmt.Println("[DEBUG] BSPChecker successfully initialized.")
 	}
-	p.bspChecker = bspChecker
+	p.BspChecker = bspChecker
 }
 
 func magnitude(v r3.Vector) float64 {
 	return math.Sqrt(v.X*v.X + v.Y*v.Y + v.Z*v.Z)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
