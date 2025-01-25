@@ -2,6 +2,7 @@ package parser
 
 import (
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -180,6 +181,11 @@ func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
 		fmt.Printf("[DEBUG] Finished parsing. Found %d events in total.\n", len(p.match.Events))
 	}
 
+	for steamID, stats := range p.match.PlayerStats {
+		fmt.Printf("[DEBUG] Player: %s (SteamID: %d), K/D/A: %d/%d/%d, TotalDamage: %d\n",
+			stats.Name, steamID, stats.Kills, stats.Deaths, stats.Assists, stats.TotalDamage)
+	}
+
 	return p.match, nil
 }
 
@@ -235,6 +241,15 @@ func (p *Parser) registerEventHandlers(debug bool) {
 
 func (p *Parser) handleRoundStart(e events.RoundStart) {
 	// Reset round-specific data
+	p.roundStartTime = time.Now()
+	p.alivePlayersByTeam = make(map[int]int)
+	p.currentRoundKills = make(map[uint64]map[int]int)
+	p.sprayStartTime = make(map[uint64]time.Time)
+	p.currentSprayShots = make(map[uint64]int)
+	p.enemySpottedTime = make(map[uint64]map[uint64]int)
+	p.firstDamageTime = make(map[uint64]map[uint64]int)
+	p.lastWeaponFireTime = make(map[uint64]time.Time)
+	p.lastDamageBy = make(map[uint64]map[uint64]int)
 	p.lastKnownHP = make(map[uint64]int)
 	p.enemySpottedTime = make(map[uint64]map[uint64]int)
 	p.firstDamageTime = make(map[uint64]map[uint64]int)
@@ -249,6 +264,19 @@ func (p *Parser) handleRoundStart(e events.RoundStart) {
 
 		stats := p.match.GetOrCreatePlayerStats(player.SteamID64, player.Name)
 		stats.IsAlive = true
+		p.alivePlayersByTeam[int(player.Team)]++
+
+		if p.parser.GameState().IsWarmupPeriod() {
+			// Don’t count warmup stats
+			stats.TotalDamage = 0
+			stats.SurvivalByPhase = make(map[string]int)
+			stats.RoundsActive = 0
+			stats.Kills = 0
+			stats.Deaths = 0
+			stats.Assists = 0
+			continue
+		}
+
 		stats.RoundsActive++
 		if p.debug {
 			fmt.Printf("[DEBUG] handleRoundStart: Player %s (SteamID: %d), RoundsActive => %d\n",
@@ -310,8 +338,8 @@ func (p *Parser) handleMatchStart(e events.MatchStart) {
 	}
 }
 
-func (p *Parser) handleKill(e events.Kill) {
-	if (!p.isLiveGameRound()) || e.Killer == nil || e.Victim == nil ||
+/*func (p *Parser) handleKill(e events.Kill) {
+	if !p.isLiveGameRound() || e.Killer == nil || e.Victim == nil ||
 		e.Killer.SteamID64 == 0 || e.Victim.SteamID64 == 0 {
 		return
 	}
@@ -330,22 +358,19 @@ func (p *Parser) handleKill(e events.Kill) {
 	victimStats.Deaths++
 	victimStats.IsAlive = false
 
-	// Handle kill assists
+	// Handle kill assists based on damage
 	victimID := e.Victim.SteamID64
 	killerID := e.Killer.SteamID64
-
-	now := time.Now()
-	p.lastKillTime = &now
-	p.lastKillVictim = victimID
-	p.lastKillKiller = killerStats
-
 	if damages, exists := p.lastDamageBy[victimID]; exists {
 		assistGiven := make(map[uint64]bool)
 		for attackerID, damage := range damages {
-			if attackerID != killerID && damage >= 41 && !assistGiven[attackerID] {
+			if attackerID != killerID && damage >= 41 {
 				attackerStats := p.match.GetOrCreatePlayerStats(attackerID, "")
 				attackerStats.Assists++
 				assistGiven[attackerID] = true
+				if p.debug {
+					fmt.Printf("[DEBUG] Assist credited to attacker %d for damage %d\n", attackerID, damage)
+				}
 			}
 		}
 		delete(p.lastDamageBy, victimID)
@@ -358,12 +383,79 @@ func (p *Parser) handleKill(e events.Kill) {
 				player.SteamID64 != killerID {
 				stats := p.match.GetOrCreatePlayerStats(player.SteamID64, player.Name)
 				stats.Assists++
+				if p.debug {
+					fmt.Printf("[DEBUG] Flash assist credited to %s\n", player.Name)
+				}
 				break
 			}
 		}
 	}
 
+	// Track multi-kills
 	p.updateMultiKills(e)
+
+	// Track map area statistics
+	p.updateMapAreaStats(e)
+
+	// Update last kill info for potential streaks or chains
+	now := time.Now()
+	p.lastKillTime = &now
+	p.lastKillVictim = victimID
+	p.lastKillKiller = killerStats
+
+	if p.debug {
+		fmt.Printf("[DEBUG] Last kill updated: Killer: %s, Victim: %s, Time: %v\n",
+			e.Killer.Name, e.Victim.Name, now)
+	}
+}*/
+
+func (p *Parser) handleKill(e events.Kill) {
+	if !p.isLiveGameRound() || e.Killer == nil || e.Victim == nil ||
+		e.Killer.SteamID64 == 0 || e.Victim.SteamID64 == 0 {
+		return
+	}
+
+	// Exclude bomb deaths
+	if e.Weapon.Type == common.EqBomb {
+		return
+	}
+
+	killerStats := p.match.GetOrCreatePlayerStats(e.Killer.SteamID64, e.Killer.Name)
+	victimStats := p.match.GetOrCreatePlayerStats(e.Victim.SteamID64, e.Victim.Name)
+
+	killerStats.Kills++
+	victimStats.Deaths++
+	victimStats.IsAlive = false
+
+	// Handle assists
+	if damages, exists := p.lastDamageBy[e.Victim.SteamID64]; exists {
+		for attackerID, damage := range damages {
+			attacker := p.match.PlayerStats[attackerID]
+			if attacker != nil && attackerID != e.Killer.SteamID64 && damage >= 41 {
+				attacker.Assists++
+			} else {
+				log.Printf("[ERROR] Attacker with ID %d not found!", attackerID)
+			}
+		}
+		delete(p.lastDamageBy, e.Victim.SteamID64)
+	}
+
+	// Handle flash assists
+	if e.AssistedFlash {
+		for _, player := range p.parser.GameState().Participants().Playing() {
+			if player.Team != e.Victim.Team && player.FlashDurationTime() > 0 &&
+				player.SteamID64 != e.Killer.SteamID64 {
+				stats := p.match.GetOrCreatePlayerStats(player.SteamID64, player.Name)
+				stats.Assists++
+				break
+			}
+		}
+	}
+
+	// Multi-kill tracking
+	p.updateMultiKills(e)
+
+	// Update map area stats
 	p.updateMapAreaStats(e)
 }
 
@@ -472,9 +564,9 @@ func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 
 					if _, alreadySpotted := p.enemySpottedTime[obs.SteamID][tgt.SteamID]; !alreadySpotted {
 						p.enemySpottedTime[obs.SteamID][tgt.SteamID] = p.currentTick
-						if p.debug {
+						/*if p.debug {
 							fmt.Printf("[DEBUG] Player %d spotted %d at tick %d\n", obs.SteamID, tgt.SteamID, p.currentTick)
-						}
+						}*/
 					}
 				}
 				frameData.VisibilityMap[obs.SteamID][tgt.SteamID] = visible
@@ -731,9 +823,12 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 }
 
 func (p *Parser) findFirstVisibleTick(attackerID, victimID uint64, currentTick, maxLookback int) (int, bool) {
-	const minContinuousVisibleTicks = 4 // About 62.5ms at 64 tick
+	const minContinuousVisibleTicks = 4  // About 62.5ms at 64 tick
+	const minVisibilityDuration = 0.0625 // 62.5ms minimum visibility
+
 	continuousVisibleTicks := 0
 	firstVisibleTick := -1
+	lastVisibleTick := -1
 
 	// Search backwards in frameStorage
 	for i := len(p.frameStorage.frames) - 1; i >= 0; i-- {
@@ -745,21 +840,26 @@ func (p *Parser) findFirstVisibleTick(attackerID, victimID uint64, currentTick, 
 		if visibleMap, ok := fd.VisibilityMap[attackerID]; ok {
 			if visibleMap[victimID] {
 				continuousVisibleTicks++
+				lastVisibleTick = fd.Tick
 				if firstVisibleTick == -1 {
 					firstVisibleTick = fd.Tick
 				}
 			} else {
-				// Reset on visibility break
-				if continuousVisibleTicks < minContinuousVisibleTicks {
-					firstVisibleTick = -1
-					continuousVisibleTicks = 0
+				// Check if previous visibility duration was sufficient
+				if continuousVisibleTicks >= minContinuousVisibleTicks &&
+					float64(lastVisibleTick-firstVisibleTick)/64.0 >= minVisibilityDuration {
+					return firstVisibleTick, true
 				}
+				// Reset on visibility break
+				firstVisibleTick = -1
+				continuousVisibleTicks = 0
 			}
 		}
 	}
 
-	// Return first tick only if we had enough continuous visible ticks
-	if continuousVisibleTicks >= minContinuousVisibleTicks {
+	// Final check for continuous visibility until current tick
+	if continuousVisibleTicks >= minContinuousVisibleTicks &&
+		float64(lastVisibleTick-firstVisibleTick)/64.0 >= minVisibilityDuration {
 		return firstVisibleTick, true
 	}
 	return -1, false
@@ -767,7 +867,7 @@ func (p *Parser) findFirstVisibleTick(attackerID, victimID uint64, currentTick, 
 
 func (p *Parser) isLiveGameRound() bool {
 	gs := p.parser.GameState()
-	return !gs.IsWarmupPeriod() && gs.TotalRoundsPlayed() >= 0
+	return !gs.IsWarmupPeriod() && !gs.IsFreezetimePeriod() && gs.TotalRoundsPlayed() >= 0
 }
 
 func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
@@ -790,6 +890,22 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 	// Count as total damage only if not team damage or self-inflicted
 	if e.Attacker.Team != e.Player.Team && e.Attacker.SteamID64 != e.Player.SteamID64 {
 		stats.TotalDamage += actualDamage
+
+		if _, exists := p.lastDamageBy[victimID]; !exists {
+			p.lastDamageBy[victimID] = make(map[uint64]int)
+		}
+		p.lastDamageBy[victimID][e.Attacker.SteamID64] += actualDamage
+
+		// Optional debug logging, to confirm it’s adding up:
+		if p.debug && e.Player.Name == "shmeeny" {
+			fmt.Printf("[DEBUG] p.lastDamageBy[%d][%d] is now %d\n",
+				victimID, e.Attacker.SteamID64,
+				p.lastDamageBy[victimID][e.Attacker.SteamID64])
+		}
+		if p.debug && e.Player.Name == "shmeeny" {
+			fmt.Printf("[DEBUG] Player %s dealt %d damage to %s. TotalDamage: %d\n",
+				e.Attacker.Name, actualDamage, e.Player.Name, stats.TotalDamage)
+		}
 	}
 
 	p.lastKnownHP[victimID] = max(oldHP-actualDamage, 0)
@@ -797,24 +913,25 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 	// Check if victim was previously spotted
 	if p.BspChecker != nil {
 		if spottedTick, wasSpotted := p.enemySpottedTime[e.Attacker.SteamID64][victimID]; wasSpotted {
-			// Count this as a spotted hit
-			stats.EnemySpottedHits++
-			if p.debug {
-				fmt.Printf("[DEBUG] handlePlayerHurt: %s => EnemySpottedHits incremented to %d\n",
-					e.Attacker.Name, stats.EnemySpottedHits)
-			}
+			// Check if damage has already been counted
+			if _, alreadyCounted := p.firstDamageTime[e.Attacker.SteamID64][victimID]; !alreadyCounted {
+				stats.EnemySpottedHits++
+				if p.debug && e.Attacker.Name == "shmeeny" {
+					fmt.Printf("[DEBUG] handlePlayerHurt: %s => EnemySpottedHits incremented to %d\n",
+						e.Attacker.Name, stats.EnemySpottedHits)
+				}
 
-			// Track ticks to first damage
-			if _, alreadyDamaged := p.firstDamageTime[e.Attacker.SteamID64][victimID]; !alreadyDamaged {
+				// Track ticks to first damage
 				ticksToHit := p.currentTick - spottedTick
 				stats.TimeToFirstDamage = append(stats.TimeToFirstDamage, float64(ticksToHit))
 
+				// Update firstDamageTime
 				if _, exists := p.firstDamageTime[e.Attacker.SteamID64]; !exists {
 					p.firstDamageTime[e.Attacker.SteamID64] = make(map[uint64]int)
 				}
 				p.firstDamageTime[e.Attacker.SteamID64][victimID] = p.currentTick
 
-				if p.debug {
+				if p.debug && e.Attacker.Name == "shmeeny" {
 					fmt.Printf("[DEBUG] Attacker %s saw victim %s for %d ticks before hitting.\n",
 						e.Attacker.Name, e.Player.Name, ticksToHit)
 				}
@@ -832,6 +949,12 @@ func (p *Parser) handleRoundEnd(e events.RoundEnd) {
 			continue
 		}
 		stats := p.match.GetOrCreatePlayerStats(player.SteamID64, player.Name)
+
+		if p.debug {
+			fmt.Printf("[DEBUG] End of round stats for %s: K/D/A: %d/%d/%d, TotalDamage: %d\n",
+				stats.Name, stats.Kills, stats.Deaths, stats.Assists, stats.TotalDamage)
+		}
+
 		if stats.IsAlive {
 			stats.RoundsSurvived++
 
@@ -845,6 +968,10 @@ func (p *Parser) handleRoundEnd(e events.RoundEnd) {
 				stats.SurvivalByPhase["late"]++
 			}
 		}
+	}
+
+	if p.debug {
+		fmt.Printf("[DEBUG] Round ended -- winner: %d reason: %d\n", e.Winner, e.Reason)
 	}
 
 	p.match.AddEvent(models.Event{

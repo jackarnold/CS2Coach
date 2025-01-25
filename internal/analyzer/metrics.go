@@ -44,9 +44,12 @@ func CalculateLeetifyMetrics(stats *models.PlayerStats, roundCount int) *models.
 		metrics.AccuracyAll = float64(stats.HitsTotal) / float64(stats.ShotsTotal) * 100
 
 		// Spotted accuracy - hits on spotted enemies / shots at spotted enemies
-		if stats.EnemySpottedShots > 0 {
-			metrics.SpottedAccuracy = float64(stats.EnemySpottedHits) / float64(stats.EnemySpottedShots) * 100
-		}
+		metrics.SpottedAccuracy = calculateSpottedAccuracy(stats)
+
+		// Old calculation for spotted accuracy commented out on purpose
+		//if stats.EnemySpottedShots > 0 {
+		//	metrics.SpottedAccuracy = float64(stats.EnemySpottedHits) / float64(stats.EnemySpottedShots) * 100
+		//}
 	}
 
 	// Head accuracy and headshot percentage
@@ -112,6 +115,13 @@ func CalculateLeetifyMetrics(stats *models.PlayerStats, roundCount int) *models.
 	metrics.LeetifyRating = calculateFinalRating(aimScore, utilityScore, survivalScore, impactScore)
 
 	return metrics
+}
+
+func calculateSpottedAccuracy(stats *models.PlayerStats) float64 {
+	if stats.HitsTotal == 0 {
+		return 0.0 // Avoid division by zero
+	}
+	return float64(stats.EnemySpottedHits) / float64(stats.HitsTotal) * 100
 }
 
 func calculateAimSubScore(metrics *models.LeetifyMetrics) float64 {
