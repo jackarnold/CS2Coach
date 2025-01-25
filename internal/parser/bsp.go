@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,26 +112,16 @@ func (b *BSPVisibilityChecker) LoadSource2MapFiles(mapDir string) error {
 	vwrldPath := filepath.Join(mapDir, "world.vwrld_c")
 	vphysPath := filepath.Join(mapDir, "world_physics.vphys_c")
 
-	// Initialize minimal BSP data for visibility checking
+	// Initialize BSP data structure for Source 2
 	b.bspData = &BSPData{
-		Nodes:  make([]Node, 1),  // At least one root node
-		Planes: make([]Plane, 1), // Corresponding plane
-		Leaves: make([]Leaf, 1),  // At least one leaf
-	}
-
-	// Initialize default values for visibility checking
-	b.bspData.Nodes[0] = Node{
-		PlaneNum: 0,
-		Children: [2]int32{-1, -1}, // Both point to first leaf
-	}
-
-	b.bspData.Planes[0] = Plane{
-		Normal:   Vector3{0, 0, 1},
-		Distance: 0,
-	}
-
-	b.bspData.Leaves[0] = Leaf{
-		Contents: 0, // Non-solid
+		Header: Header{
+			Ident:     [4]byte{'V', 'B', 'S', 'P'},
+			Version:   1,
+			LumpCount: 64,
+		},
+		Nodes:  make([]Node, 4096), // Reasonable size for CS2 maps
+		Planes: make([]Plane, 4096),
+		Leaves: make([]Leaf, 4096),
 	}
 
 	// Load visibility data
@@ -500,48 +491,84 @@ func extractBSPFromVPK(vpkPath, mapName, outputDir string) error {
 	return nil
 }
 
+// IsVisible determines if there's a clear line of sight between two points
 func (b *BSPVisibilityChecker) IsVisible(from, to r3.Vector) bool {
-	if b.bspData == nil {
-		fmt.Println("[DEBUG] IsVisible(): bspData is nil, returning false")
+	// Simple distance check first
+	direction := to.Sub(from)
+	distance := direction.Norm()
+	if distance > 2000 {
 		return false
 	}
 
-	// Convert to Vector3 for BSP functions
+	// Early out if BSP data isn't loaded
+	if b.bspData == nil {
+		return false
+	}
+
+	// Convert to local coords
 	start := Vector3{float32(from.X), float32(from.Y), float32(from.Z)}
 	end := Vector3{float32(to.X), float32(to.Y), float32(to.Z)}
 
-	direction := to.Sub(from)
-	distance := direction.Norm()
+	// Check main visibility line
+	return !b.bspData.hasVisualBlocker(start, end)
+}
 
-	// Debug line
-	/*fmt.Printf("[DEBUG] IsVisible() from=(%.1f, %.1f, %.1f) to=(%.1f, %.1f, %.1f), dist=%.1f\n",
-	from.X, from.Y, from.Z,
-	to.X, to.Y, to.Z,
-	distance)*/
+// hasVisualBlocker checks if there are any solid nodes between two points
+func (bsp *BSPData) hasVisualBlocker(start, end Vector3) bool {
+	maxSteps := 32
+	steps := 0
 
-	if distance > 2000 {
-		//fmt.Println("[DEBUG] IsVisible(): distance > 2000, returning false")
-		return false
+	// Points in 3D space between start and end
+	points := []Vector3{
+		start,
+		{(start.X + end.X) / 2, (start.Y + end.Y) / 2, (start.Z + end.Z) / 2},
+		end,
 	}
 
-	// Check if either point is in a solid leaf
-	startLeaf := b.bspData.findLeaf(start, 0)
-	endLeaf := b.bspData.findLeaf(end, 0)
+	// Check if any point along the line intersects with solid
+	for _, point := range points {
+		node := int32(0)
+		solid := false
 
-	if startLeaf == nil || endLeaf == nil {
-		fmt.Println("[DEBUG] IsVisible(): start or end leaf is nil, returning false")
-		return false
+		// Walk down BSP tree until we hit a leaf
+		for steps < maxSteps {
+			steps++
+
+			if node < 0 { // Leaf node
+				leafIndex := ^node
+				if leafIndex >= int32(len(bsp.Leaves)) {
+					return true
+				}
+				leaf := bsp.Leaves[leafIndex]
+				solid = leaf.Contents&1 != 0
+				break
+			}
+
+			if node >= int32(len(bsp.Nodes)) {
+				return true
+			}
+
+			current := bsp.Nodes[node]
+			if current.PlaneNum >= int32(len(bsp.Planes)) {
+				return true
+			}
+
+			plane := bsp.Planes[current.PlaneNum]
+			dist := dotProduct(plane.Normal, point) - plane.Distance
+
+			if dist >= 0 {
+				node = current.Children[0]
+			} else {
+				node = current.Children[1]
+			}
+		}
+
+		if solid {
+			return true
+		}
 	}
 
-	if startLeaf.Contents&1 != 0 || endLeaf.Contents&1 != 0 {
-		fmt.Println("[DEBUG] IsVisible(): start or end in solid leaf, returning false")
-		return false
-	}
-
-	// Trace line through BSP tree
-	result := b.bspData.CheckLineOfSight(start, end)
-	//fmt.Printf("[DEBUG] IsVisible(): final line-of-sight result = %v\n", result)
-	return result
+	return false
 }
 
 func readLumpData(r io.Reader, offset int64, size int) ([]byte, error) {
@@ -673,75 +700,114 @@ func (bsp *BSPData) CheckLineOfSight(start, end Vector3) bool {
 }
 
 func (bsp *BSPData) findLeaf(point Vector3, nodeIndex int32) *Leaf {
-	if nodeIndex < 0 {
-		return &bsp.Leaves[^nodeIndex]
+	// Base case - reached max recursion depth
+	maxDepth := int32(64) // Typical max BSP tree depth
+	for depth := int32(0); depth < maxDepth; depth++ {
+		if nodeIndex < 0 {
+			// Convert to leaf index by flipping bits
+			leafIndex := ^nodeIndex
+			if leafIndex >= int32(len(bsp.Leaves)) {
+				return nil
+			}
+			return &bsp.Leaves[leafIndex]
+		}
+
+		if nodeIndex >= int32(len(bsp.Nodes)) {
+			return nil
+		}
+
+		node := bsp.Nodes[nodeIndex]
+		if node.PlaneNum >= int32(len(bsp.Planes)) {
+			return nil
+		}
+
+		plane := bsp.Planes[node.PlaneNum]
+		dist := dotProduct(plane.Normal, point) - plane.Distance
+
+		if dist >= 0 {
+			nodeIndex = node.Children[0]
+		} else {
+			nodeIndex = node.Children[1]
+		}
 	}
 
-	node := bsp.Nodes[nodeIndex]
-	plane := bsp.Planes[node.PlaneNum]
-
-	dist := dotProduct(plane.Normal, point) - plane.Distance
-
-	if dist >= 0 {
-		return bsp.findLeaf(point, node.Children[0])
+	// Hit max depth - return first leaf as fallback
+	if len(bsp.Leaves) > 0 {
+		return &bsp.Leaves[0]
 	}
-	return bsp.findLeaf(point, node.Children[1])
+	return nil
 }
 
 func (bsp *BSPData) traverseNode(nodeIndex int32, start, end Vector3, startFrac, endFrac float32) bool {
-	if nodeIndex < 0 {
-		leaf := bsp.Leaves[^nodeIndex]
-		return leaf.Contents&1 == 0 // Not solid
+	depth := 0
+	maxDepth := 32
+	visited := make(map[int32]bool)
+
+	var traverse func(nodeIndex int32, start, end Vector3, startFrac, endFrac float32) bool
+	traverse = func(nodeIndex int32, start, end Vector3, startFrac, endFrac float32) bool {
+		if depth >= maxDepth || visited[nodeIndex] {
+			return true // Default visible after max depth or cycle detected
+		}
+		visited[nodeIndex] = true
+		depth++
+
+		if nodeIndex < 0 {
+			leafIndex := ^nodeIndex
+			if leafIndex >= int32(len(bsp.Leaves)) {
+				return false
+			}
+			leaf := bsp.Leaves[leafIndex]
+			return leaf.Contents&1 == 0 // Not solid
+		}
+
+		if nodeIndex >= int32(len(bsp.Nodes)) {
+			return false
+		}
+
+		node := bsp.Nodes[nodeIndex]
+		if node.PlaneNum >= int32(len(bsp.Planes)) {
+			return false
+		}
+
+		plane := bsp.Planes[node.PlaneNum]
+		startDist := dotProduct(plane.Normal, start) - plane.Distance
+		endDist := dotProduct(plane.Normal, end) - plane.Distance
+
+		const EPSILON = 0.03125
+
+		if startDist >= EPSILON && endDist >= EPSILON {
+			return traverse(node.Children[0], start, end, startFrac, endFrac)
+		}
+		if startDist < -EPSILON && endDist < -EPSILON {
+			return traverse(node.Children[1], start, end, startFrac, endFrac)
+		}
+
+		var side int32
+		var frac float32
+		if startDist < endDist {
+			side = 1
+			frac = startDist / (startDist - endDist)
+		} else {
+			side = 0
+			frac = endDist / (endDist - startDist)
+		}
+
+		frac = float32(math.Max(0, math.Min(1, float64(frac))))
+
+		mid := Vector3{
+			X: start.X + frac*(end.X-start.X),
+			Y: start.Y + frac*(end.Y-start.Y),
+			Z: start.Z + frac*(end.Z-start.Z),
+		}
+
+		if !traverse(node.Children[side], start, mid, startFrac, startFrac+(endFrac-startFrac)*frac) {
+			return false
+		}
+
+		return traverse(node.Children[1-side], mid, end, startFrac+(endFrac-startFrac)*frac, endFrac)
 	}
 
-	node := bsp.Nodes[nodeIndex]
-	plane := bsp.Planes[node.PlaneNum]
-
-	startDist := dotProduct(plane.Normal, start) - plane.Distance
-	endDist := dotProduct(plane.Normal, end) - plane.Distance
-
-	const EPSILON = 0.03125
-
-	// Check if line is entirely on one side
-	if startDist >= EPSILON && endDist >= EPSILON {
-		return bsp.traverseNode(node.Children[0], start, end, startFrac, endFrac)
-	}
-	if startDist < -EPSILON && endDist < -EPSILON {
-		return bsp.traverseNode(node.Children[1], start, end, startFrac, endFrac)
-	}
-
-	// Line spans the splitting plane
-	var side int32
-	var frac float32
-	if startDist < endDist {
-		side = 1
-		frac = startDist / (startDist - endDist)
-	} else {
-		side = 0
-		frac = endDist / (endDist - startDist)
-	}
-
-	// Clamp to prevent precision issues
-	if frac < 0 {
-		frac = 0
-	} else if frac > 1 {
-		frac = 1
-	}
-
-	// Calculate intersection point
-	mid := Vector3{
-		X: start.X + frac*(end.X-start.X),
-		Y: start.Y + frac*(end.Y-start.Y),
-		Z: start.Z + frac*(end.Z-start.Z),
-	}
-
-	// Check near side
-	if !bsp.traverseNode(node.Children[side], start, mid, startFrac, startFrac+(endFrac-startFrac)*frac) {
-		return false
-	}
-
-	// Check far side
-	return bsp.traverseNode(node.Children[1-side], mid, end, startFrac+(endFrac-startFrac)*frac, endFrac)
+	return traverse(nodeIndex, start, end, startFrac, endFrac)
 }
 
 func dotProduct(a, b Vector3) float32 {
