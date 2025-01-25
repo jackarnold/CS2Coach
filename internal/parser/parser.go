@@ -518,16 +518,11 @@ func (p *Parser) rayVisible(obs PlayerFrameData, tgt PlayerFrameData) bool {
 			fmt.Println("[DEBUG] Warning: BSP file not loaded, skipping visibility checks in rayVisible.")
 			p.warnedBspChecker = true
 		}
-		// Return false or allow fallback logic based on your use case
 		return false
 	}
 
 	// Check visibility using BSP checker
 	visible := p.BspChecker.IsVisible(obs.Position, tgt.Position)
-	/*if p.debug {
-		fmt.Printf("[DEBUG] rayVisible: from (%v) to (%v), bspChecker says: %v\n",
-			obs.Position, tgt.Position, visible)
-	}*/
 	if !visible {
 		return false
 	}
@@ -537,13 +532,13 @@ func (p *Parser) rayVisible(obs PlayerFrameData, tgt PlayerFrameData) bool {
 		return false
 	}
 
-	// Basic distance check
+	// Basic distance check - reduced from 2000 to be more realistic
 	dist := tgt.Position.Sub(obs.Position).Norm()
-	if dist > 2000 {
+	if dist > 1500 {
 		return false
 	}
 
-	// Angle check
+	// Angle check with narrower FOV
 	angleToTarget := calcAngleBetween(obs.Position, tgt.Position)
 	angleDiff := float32(math.Abs(float64(angleToTarget - obs.ViewAngleX)))
 
@@ -552,8 +547,8 @@ func (p *Parser) rayVisible(obs PlayerFrameData, tgt PlayerFrameData) bool {
 		angleDiff = 360 - angleDiff
 	}
 
-	// Require target to be within ~60° FOV
-	if angleDiff > 60 {
+	// Reduced FOV from 60° to 35° for more accurate visibility
+	if angleDiff > 35 {
 		return false
 	}
 
@@ -682,28 +677,28 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 	shooterID := e.Shooter.SteamID64
 	currentTick := p.parser.GameState().IngameTick()
 	enemySpotted := false
+	const minVisibilityDuration = 0.1 // Minimum 100ms visibility required
+	const lookbackTicks = 128         // Doubled from 64 for better accuracy
 
 	for _, enemy := range p.parser.GameState().Participants().Playing() {
 		if enemy.Team == e.Shooter.Team || enemy.SteamID64 == 0 {
 			continue
 		}
 
-		firstVisibleTick, found := p.findFirstVisibleTick(shooterID, enemy.SteamID64, currentTick, 64)
-
-		// Debug info
-		if p.debug {
-			fmt.Printf("[DEBUG] Shooter: %s, Target: %s, Visible (within last 64 ticks): %v, EnemySpottedShots: %d\n",
-				e.Shooter.Name, enemy.Name, found, stats.EnemySpottedShots)
-		}
+		firstVisibleTick, found := p.findFirstVisibleTick(shooterID, enemy.SteamID64, currentTick, lookbackTicks)
 
 		if found {
-			enemySpotted = true
-			timeInView := float64(currentTick-firstVisibleTick) / 64.0 // Assuming ~64 ticks/sec
-			stats.TimeToFirstShot = append(stats.TimeToFirstShot, timeInView)
+			timeInView := float64(currentTick-firstVisibleTick) / 64.0
 
-			if p.debug {
-				fmt.Printf("[DEBUG] Shooter: %s saw enemy for %.2f seconds before firing. Next SpottedShots => %d\n",
-					e.Shooter.Name, timeInView, stats.EnemySpottedShots+1)
+			// Only count as spotted if visible for minimum duration
+			if timeInView >= minVisibilityDuration {
+				enemySpotted = true
+				stats.TimeToFirstShot = append(stats.TimeToFirstShot, timeInView)
+
+				if p.debug {
+					fmt.Printf("[DEBUG] Shooter: %s saw enemy for %.2f seconds before firing. Next SpottedShots => %d\n",
+						e.Shooter.Name, timeInView, stats.EnemySpottedShots+1)
+				}
 			}
 		}
 	}
@@ -716,36 +711,56 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 		}
 	}
 
-	// Track spray shots
-	if p.frameStorage.frames != nil {
-		stats.SprayShots++
+	// Track spray control
+	if len(p.frameStorage.frames) > 0 {
+		// Check velocity for spray control
+		if magnitude(e.Shooter.Velocity()) > 50 {
+			stats.SprayShots++
+		}
 	}
 
-	// Track counter-strafing
+	// Improved counter-strafe detection
 	prevVel := stats.Velocity[e.Shooter.Name]
 	currentVel := magnitude(e.Shooter.Velocity())
-	if prevVel > 100 && currentVel < 20 {
+	if prevVel > 150 && currentVel < 20 { // Adjusted thresholds
 		stats.CounterStrafedShots++
 	}
 	stats.Velocity[e.Shooter.Name] = currentVel
 
-	// Update lastWeaponFireTime for trade logic
 	p.lastWeaponFireTime[shooterID] = time.Now()
 }
 
 func (p *Parser) findFirstVisibleTick(attackerID, victimID uint64, currentTick, maxLookback int) (int, bool) {
-	// Search backwards in frameStorage for up to maxLookback ticks
+	const minContinuousVisibleTicks = 4 // About 62.5ms at 64 tick
+	continuousVisibleTicks := 0
+	firstVisibleTick := -1
+
+	// Search backwards in frameStorage
 	for i := len(p.frameStorage.frames) - 1; i >= 0; i-- {
 		fd := p.frameStorage.frames[i]
 		if fd.Tick < currentTick-maxLookback {
 			break
 		}
+
 		if visibleMap, ok := fd.VisibilityMap[attackerID]; ok {
 			if visibleMap[victimID] {
-				// Found a frame where attacker could see victim
-				return fd.Tick, true
+				continuousVisibleTicks++
+				if firstVisibleTick == -1 {
+					firstVisibleTick = fd.Tick
+				}
+			} else {
+				// Reset on visibility break
+				if continuousVisibleTicks < minContinuousVisibleTicks {
+					firstVisibleTick = -1
+					continuousVisibleTicks = 0
+				}
 			}
 		}
+	}
+
+	// Return first tick only if we had enough continuous visible ticks
+	if continuousVisibleTicks >= minContinuousVisibleTicks {
+		return firstVisibleTick, true
 	}
 	return -1, false
 }
