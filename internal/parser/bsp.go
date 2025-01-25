@@ -156,6 +156,7 @@ func (b *BSPVisibilityChecker) LoadVVISData(vvisPath string) error {
 }
 
 // LoadBSPForMap updated to work with Source 2 map files
+// LoadBSPForMap updated to ensure correct paths for Source 2 map files
 func (l *BSPLoader) LoadBSPForMap(mapName string) (*BSPVisibilityChecker, error) {
 	fmt.Printf("Attempting to load BSP for map %s\n", mapName)
 	fmt.Printf("CS2 Path: %s\n", l.cs2Path)
@@ -165,24 +166,26 @@ func (l *BSPLoader) LoadBSPForMap(mapName string) (*BSPVisibilityChecker, error)
 		return nil, fmt.Errorf("CS2 path not found: %s", l.cs2Path)
 	}
 
-	if err := os.MkdirAll(l.tempDir, 0755); err != nil {
+	// Create a temp directory for extracted map files
+	mapExtractDir := filepath.Join(l.tempDir, "maps", mapName)
+	if err := os.MkdirAll(mapExtractDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create temp dir: %v", err)
 	}
 
-	// First try map-specific VPK
+	// Try extracting from map-specific VPK
 	mapVPKPath := filepath.Join(l.cs2Path, "maps", mapName+".vpk")
 	if fileExists(mapVPKPath) {
-		if err := l.processVPKFile(mapVPKPath, mapName, l.tempDir); err == nil {
+		if err := l.processVPKFile(mapVPKPath, mapName, mapExtractDir); err == nil {
 			// Successfully found and extracted map files
 			checker := &BSPVisibilityChecker{}
-			if err := checker.LoadSource2MapFiles(l.tempDir); err != nil {
+			if err := checker.LoadSource2MapFiles(mapExtractDir); err != nil {
 				return nil, fmt.Errorf("failed to load Source 2 map files: %v", err)
 			}
 			return checker, nil
 		}
 	}
 
-	// Try pak01_dir.vpk and numbered VPKs
+	// Try extracting from `pak01_dir.vpk` and its siblings
 	files, err := os.ReadDir(l.cs2Path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read CS2 directory: %v", err)
@@ -192,14 +195,18 @@ func (l *BSPLoader) LoadBSPForMap(mapName string) (*BSPVisibilityChecker, error)
 		if !file.IsDir() && strings.HasPrefix(strings.ToLower(file.Name()), "pak01_") &&
 			strings.HasSuffix(strings.ToLower(file.Name()), ".vpk") {
 			vpkPath := filepath.Join(l.cs2Path, file.Name())
-			if err := l.processVPKFile(vpkPath, mapName, l.tempDir); err == nil {
+			if err := l.processVPKFile(vpkPath, mapName, mapExtractDir); err == nil {
 				// Successfully found and extracted map files
-				return &BSPVisibilityChecker{}, nil
+				checker := &BSPVisibilityChecker{}
+				if err := checker.LoadSource2MapFiles(mapExtractDir); err != nil {
+					return nil, fmt.Errorf("failed to load Source 2 map files: %v", err)
+				}
+				return checker, nil
 			}
 		}
 	}
 
-	return nil, fmt.Errorf("Map files not found in any VPK file")
+	return nil, fmt.Errorf("map files not found in any VPK file")
 }
 
 // Update NewBSPVisibilityChecker to use the loader
