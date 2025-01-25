@@ -768,6 +768,7 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 
 	shooterID := e.Shooter.SteamID64
 	currentTick := p.parser.GameState().IngameTick()
+	currentTime := time.Now()
 	enemySpotted := false
 	const minVisibilityDuration = 0.1 // Minimum 100ms visibility required
 	const lookbackTicks = 128         // Doubled from 64 for better accuracy
@@ -804,10 +805,12 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 	}
 
 	// Track spray control
-	if len(p.frameStorage.frames) > 0 {
-		// Check velocity for spray control
-		if magnitude(e.Shooter.Velocity()) > 50 {
-			stats.SprayShots++
+	// Check if this shot is part of a spray
+	lastFireTime, hadPreviousShot := p.lastWeaponFireTime[shooterID]
+	if hadPreviousShot && currentTime.Sub(lastFireTime) <= 200*time.Millisecond { // Adjust spray threshold as needed
+		stats.SprayShots++
+		if p.debug {
+			fmt.Printf("[DEBUG] Spray shot detected for player %s\n", e.Shooter.Name)
 		}
 	}
 
@@ -819,7 +822,7 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 	}
 	stats.Velocity[e.Shooter.Name] = currentVel
 
-	p.lastWeaponFireTime[shooterID] = time.Now()
+	p.lastWeaponFireTime[shooterID] = currentTime
 }
 
 func (p *Parser) findFirstVisibleTick(attackerID, victimID uint64, currentTick, maxLookback int) (int, bool) {
@@ -894,7 +897,16 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 		if _, exists := p.lastDamageBy[victimID]; !exists {
 			p.lastDamageBy[victimID] = make(map[uint64]int)
 		}
+
 		p.lastDamageBy[victimID][e.Attacker.SteamID64] += actualDamage
+
+		// Check if this hit was part of a spray
+		if p.lastWeaponFireTime[e.Attacker.SteamID64].Add(200 * time.Millisecond).After(time.Now()) { // Adjust spray window
+			stats.SprayHits++
+			if p.debug {
+				fmt.Printf("[DEBUG] Spray hit detected for player %s\n", e.Attacker.Name)
+			}
+		}
 
 		// Optional debug logging, to confirm it’s adding up:
 		if p.debug && e.Player.Name == "shmeeny" {
