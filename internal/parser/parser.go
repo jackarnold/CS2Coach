@@ -72,6 +72,9 @@ type Parser struct {
 	spottedStats       map[uint64]int
 	mapNameFound       bool
 	sprayThreshold     time.Duration
+	playerStatsCache   map[uint64]*models.PlayerStats // Centralized cache for player stats
+	lastSprayTick      map[uint64]int                 // Last spray shot tick per player
+	sprayTickWindow    int                            // Ticks window for spray (12 ticks = ~200ms)
 }
 
 func NewParser(debug bool) *Parser {
@@ -89,11 +92,16 @@ func NewParser(debug bool) *Parser {
 		angleHistory:       make(map[uint64][]float32),
 		lastKnownHP:        make(map[uint64]int),
 		visibilityCache:    make(map[uint64]map[uint64]bool),
+		visibilityStats:    make(map[uint64]int),
+		spottedStats:       make(map[uint64]int),
 		flashedPlayers:     make(map[uint64]time.Time),
 		lastProcessedTick:  -1,
-		frameStorage:       FrameStorage{},
+		frameStorage:       FrameStorage{frames: make([]FrameData, 0)},
 		mapNameFound:       false,
 		sprayThreshold:     200 * time.Millisecond,
+		playerStatsCache:   make(map[uint64]*models.PlayerStats),
+		lastSprayTick:      make(map[uint64]int),
+		sprayTickWindow:    64, // ~1000ms at 64 tick
 	}
 }
 
@@ -107,12 +115,29 @@ func (p *Parser) GetOrCreatePlayerStats(steamID uint64, name string) *models.Pla
 		return nil
 	}
 
-	_, exists := p.match.PlayerStats[steamID]
-	if !exists {
-		log.Printf("[INFO] Creating new PlayerStats for SteamID: %d, Name: %s", steamID, name)
+	// Check cache first
+	if stats, exists := p.playerStatsCache[steamID]; exists {
+		// If we didn't previously know the name for this player, we update it when we do
+		if stats.Name == "" && name != "" {
+			stats.Name = name
+			p.playerStatsCache[steamID] = stats
+		}
+		return stats
 	}
 
+	// Fetch or create from match data
 	stats := p.match.GetOrCreatePlayerStats(steamID, name)
+	if stats == nil {
+		log.Printf("[ERROR] Failed to create player stats for SteamID: %d", steamID)
+		return nil
+	}
+
+	// If we didn't previously know the name for this player, we update it when we do
+	if stats.Name == "" && name != "" {
+		stats.Name = name
+	}
+
+	// Initialize all required maps and slices
 	if stats.TimeToFirstDamage == nil {
 		stats.TimeToFirstDamage = make([]float64, 0)
 	}
@@ -122,6 +147,19 @@ func (p *Parser) GetOrCreatePlayerStats(steamID uint64, name string) *models.Pla
 	if stats.Velocity == nil {
 		stats.Velocity = make(map[string]float64)
 	}
+	if stats.MapAreaKills == nil {
+		stats.MapAreaKills = make(map[string]int)
+	}
+	if stats.MapAreaDeaths == nil {
+		stats.MapAreaDeaths = make(map[string]int)
+	}
+	if stats.SurvivalByPhase == nil {
+		stats.SurvivalByPhase = make(map[string]int)
+	}
+
+	// Cache the stats for future use
+	p.playerStatsCache[steamID] = stats
+
 	return stats
 }
 
@@ -258,6 +296,7 @@ func (p *Parser) handleRoundStart(e events.RoundStart) {
 	p.currentRoundKills = make(map[uint64]map[int]int)
 	p.sprayStartTime = make(map[uint64]time.Time)
 	p.currentSprayShots = make(map[uint64]int)
+	p.lastSprayTick = make(map[uint64]int)
 	p.enemySpottedTime = make(map[uint64]map[uint64]int)
 	p.firstDamageTime = make(map[uint64]map[uint64]int)
 	p.lastWeaponFireTime = make(map[uint64]time.Time)
@@ -442,7 +481,7 @@ func (p *Parser) handleKill(e events.Kill) {
 	// Handle assists
 	if damages, exists := p.lastDamageBy[e.Victim.SteamID64]; exists {
 		for attackerID, damage := range damages {
-			attacker := p.match.PlayerStats[attackerID]
+			attacker := p.GetOrCreatePlayerStats(attackerID, "")
 			if attacker != nil && attackerID != e.Killer.SteamID64 && damage >= 41 {
 				attacker.Assists++
 			} else {
@@ -478,9 +517,12 @@ func (p *Parser) updateMultiKills(e events.Kill) {
 	}
 	p.currentRoundKills[e.Killer.SteamID64][currentRound]++
 
-	killCount := p.currentRoundKills[e.Killer.SteamID64][currentRound]
 	killerStats := p.match.GetOrCreatePlayerStats(e.Killer.SteamID64, e.Killer.Name)
+	if killerStats == nil {
+		return
+	}
 
+	killCount := p.currentRoundKills[e.Killer.SteamID64][currentRound]
 	switch killCount {
 	case 2:
 		killerStats.TwoKills++
@@ -538,6 +580,10 @@ func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 	for _, player := range gs.Participants().Playing() {
 		if player.SteamID64 == 0 {
 			continue
+		}
+
+		if _, exists := p.enemySpottedTime[player.SteamID64]; !exists {
+			p.enemySpottedTime[player.SteamID64] = make(map[uint64]int)
 		}
 
 		pFrame := PlayerFrameData{
@@ -725,22 +771,31 @@ func (p *Parser) handleTrade(e events.Kill) {
 	for _, player := range p.parser.GameState().Participants().Playing() {
 		if player.Team == e.Victim.Team && player.IsAlive() {
 			stats := p.match.GetOrCreatePlayerStats(player.SteamID64, player.Name)
+			if stats == nil {
+				continue
+			}
+
 			stats.TradeKillOpportunities++
 
-			if time.Since(p.lastWeaponFireTime[player.SteamID64]) <= 3*time.Second {
+			lastFireTime, exists := p.lastWeaponFireTime[player.SteamID64]
+			if exists && time.Since(lastFireTime) <= 3*time.Second {
 				stats.TradeKillAttempts++
 			}
 		}
 	}
 
 	// Record traded deaths
-	victim := p.match.GetOrCreatePlayerStats(e.Victim.SteamID64, e.Victim.Name)
+	victim := p.GetOrCreatePlayerStats(e.Victim.SteamID64, e.Victim.Name)
+	if victim == nil {
+		return
+	}
+
 	victim.TradedDeathOpportunities++
 
-	if time.Since(p.lastWeaponFireTime[e.Victim.SteamID64]) <= 3*time.Second {
+	lastFireTime, exists := p.lastWeaponFireTime[e.Victim.SteamID64]
+	if exists && time.Since(lastFireTime) <= 3*time.Second {
 		victim.TradedDeathAttempts++
 
-		// Check if the death was actually traded
 		if p.lastKillTime != nil && time.Since(*p.lastKillTime) <= 3*time.Second {
 			if p.lastKillVictim == e.Killer.SteamID64 {
 				victim.TradedDeaths++
@@ -776,6 +831,10 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 	}
 
 	stats := p.match.GetOrCreatePlayerStats(e.Shooter.SteamID64, e.Shooter.Name)
+	if stats == nil {
+		return
+	}
+
 	stats.ShotsTotal++
 
 	shooterID := e.Shooter.SteamID64
@@ -784,6 +843,12 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 	enemySpotted := false
 	const minVisibilityDuration = 0.1 // Minimum 100ms visibility required
 	const lookbackTicks = 128         // Doubled from 64 for better accuracy
+
+	// Initialize maps if needed
+	if _, exists := p.currentSprayShots[shooterID]; !exists {
+		p.currentSprayShots[shooterID] = 0
+		p.lastSprayTick[shooterID] = currentTick
+	}
 
 	for _, enemy := range p.parser.GameState().Participants().Playing() {
 		if enemy.Team == e.Shooter.Team || enemy.SteamID64 == 0 {
@@ -818,22 +883,22 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 		// Check spray timing
 		if p.isSprayableWeapon(e.Weapon.Class()) {
 			fmt.Printf("[DEBUG] handleWeaponFire: Weapon %s classified as sprayable\n", e.Weapon.Type)
-			currentTime := time.Now()
-			if p.lastWeaponFireTime[shooterID].Add(p.sprayThreshold).After(currentTime) {
+			// 32 ticks = ~500ms at 64 tick rate
+			if currentTick-p.lastSprayTick[shooterID] <= p.sprayTickWindow {
 				p.currentSprayShots[shooterID]++
+				// Once we're in a spray (3+ shots), count all shots
+				if p.currentSprayShots[shooterID] >= 3 {
+					stats.SprayShots++
+					if p.debug {
+						fmt.Printf("[DEBUG] Spray shot detected for %s. Count: %d, Total: %d\n",
+							e.Shooter.Name, p.currentSprayShots[shooterID], stats.SprayShots)
+					}
+				}
 			} else {
-				// Reset spray if time gap is too long
+				// Reset spray count if time window exceeded
 				p.currentSprayShots[shooterID] = 1
 			}
-			p.lastWeaponFireTime[shooterID] = currentTime
-
-			// Count only sprays of 3+ shots
-			if p.currentSprayShots[shooterID] >= 3 {
-				stats.SprayShots++
-				if p.debug {
-					fmt.Printf("[DEBUG] Spray shot detected for player %s\n", e.Shooter.Name)
-				}
-			}
+			p.lastSprayTick[shooterID] = currentTick
 		}
 	}
 
@@ -907,7 +972,16 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 	}
 
 	stats := p.match.GetOrCreatePlayerStats(e.Attacker.SteamID64, e.Attacker.Name)
+	if stats == nil {
+		return
+	}
+
 	stats.HitsTotal++
+
+	victimStats := p.GetOrCreatePlayerStats(e.Player.SteamID64, e.Player.Name)
+	if victimStats == nil {
+		return
+	}
 
 	if e.HitGroup == events.HitGroupHead {
 		stats.Headshots++
@@ -917,23 +991,26 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 	oldHP := p.lastKnownHP[victimID]
 	actualDamage := min(e.HealthDamage, oldHP)
 
+	// Initialize damage tracking maps if needed
+	if _, exists := p.lastDamageBy[victimID]; !exists {
+		p.lastDamageBy[victimID] = make(map[uint64]int)
+	}
+
 	// Count as total damage only if not team damage or self-inflicted
 	if e.Attacker.Team != e.Player.Team && e.Attacker.SteamID64 != e.Player.SteamID64 {
 		stats.TotalDamage += actualDamage
 
-		if _, exists := p.lastDamageBy[victimID]; !exists {
-			p.lastDamageBy[victimID] = make(map[uint64]int)
-		}
-
-		p.lastDamageBy[victimID][e.Attacker.SteamID64] += actualDamage
+		p.lastDamageBy[victimStats.SteamID][e.Attacker.SteamID64] += actualDamage
 
 		// Check if this hit was part of a spray
 		if p.isSprayableWeapon(e.Weapon.Class()) {
 			fmt.Printf("[DEBUG] handlePlayerHurt: Weapon %s classified as sprayable\n", e.Weapon.Type)
-			if p.currentSprayShots[e.Attacker.SteamID64] >= 3 {
+			attackerID := e.Attacker.SteamID64
+			if p.currentSprayShots[attackerID] >= 3 {
 				stats.SprayHits++
 				if p.debug {
-					fmt.Printf("[DEBUG] Spray hit detected for player %s\n", e.Attacker.Name)
+					fmt.Printf("[DEBUG] Spray hit by %s (total: %d)\n",
+						e.Attacker.Name, stats.SprayHits)
 				}
 			}
 		}
@@ -955,6 +1032,10 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 	// Check if victim was previously spotted
 	if p.BspChecker != nil {
 		if spottedTick, wasSpotted := p.enemySpottedTime[e.Attacker.SteamID64][victimID]; wasSpotted {
+			if _, exists := p.firstDamageTime[e.Attacker.SteamID64]; !exists {
+				p.firstDamageTime[e.Attacker.SteamID64] = make(map[uint64]int)
+			}
+
 			// Check if damage has already been counted
 			if _, alreadyCounted := p.firstDamageTime[e.Attacker.SteamID64][victimID]; !alreadyCounted {
 				stats.EnemySpottedHits++

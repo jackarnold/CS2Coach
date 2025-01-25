@@ -59,22 +59,22 @@ type PlayerStats struct {
 	// Movement tracking
 	Velocity map[string]float64
 
-	WeaponStats       map[string]*WeaponStats // Missing field
-	MapAreaKills      map[string]int          // Missing field
-	MapAreaDeaths     map[string]int          // Missing field
-	FlashAssists      int                     // Missing field
-	PeekKills         int                     // Missing field
-	PeekDeaths        int                     // Missing field
-	SprayTransfers    int                     // Missing field
-	ReactionTimeTotal float64                 // Missing field
-	ReactionTimeCount int                     // Missing field
-	EquipmentValue    int                     // Missing field
-	MoneySpent        int                     // Missing field
-	SiteHolds         int                     // Missing field
-	EntryKills        int                     // Missing field
-	EntryAttempts     int                     // Missing field
-	ForceBuyKills     int                     // Missing field
-	ForceBuyDeaths    int                     // Missing field
+	WeaponStats       map[string]*WeaponStats
+	MapAreaKills      map[string]int
+	MapAreaDeaths     map[string]int
+	FlashAssists      int
+	PeekKills         int
+	PeekDeaths        int
+	SprayTransfers    int
+	ReactionTimeTotal float64
+	ReactionTimeCount int
+	EquipmentValue    int
+	MoneySpent        int
+	SiteHolds         int
+	EntryKills        int
+	EntryAttempts     int
+	ForceBuyKills     int
+	ForceBuyDeaths    int
 }
 
 type UtilityStats struct {

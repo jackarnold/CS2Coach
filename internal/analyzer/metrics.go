@@ -62,7 +62,13 @@ func CalculateLeetifyMetrics(stats *models.PlayerStats, roundCount int) *models.
 
 	// Spray control
 	if stats.SprayShots > 0 {
-		metrics.SprayAccuracy = float64(stats.SprayHits) / float64(stats.SprayShots) * 100
+		// Ensure values are within reasonable bounds
+		if stats.SprayHits <= stats.SprayShots {
+			metrics.SprayAccuracy = float64(stats.SprayHits) / float64(stats.SprayShots) * 100
+		} else {
+			// If hits somehow exceed shots, cap at 100%
+			metrics.SprayAccuracy = 100.0
+		}
 	}
 
 	// Counter-strafing percentage
