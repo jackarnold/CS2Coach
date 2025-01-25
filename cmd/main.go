@@ -3,13 +3,10 @@ package main
 import (
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 
-	"github.com/NublyBR/go-vpk"
 	"github.com/richardkiene/CS2Coach/internal/analyzer"
 	"github.com/richardkiene/CS2Coach/internal/coach"
 	"github.com/richardkiene/CS2Coach/internal/ml"
@@ -40,9 +37,10 @@ func main() {
 	predictSteamID := predictCmd.String("steamid", "", "Steam ID to predict")
 
 	// Inspect VPK command flags
-	vpkPath := inspectVPKCmd.String("path", "", "Path to VPK file to inspect")
+	path := inspectVPKCmd.String("path", "", "Path to VPK file or directory")
 	outputDir := inspectVPKCmd.String("output", "", "Output directory for extracted files")
 	mapName := inspectVPKCmd.String("map", "", "Map name to extract (without .bsp extension)")
+	recursive := inspectVPKCmd.Bool("recursive", false, "Recursively process subdirectories")
 
 	if len(os.Args) < 2 {
 		fmt.Println("Expected 'analyze', 'train', 'predict', or 'inspect-vpk' subcommands")
@@ -55,25 +53,24 @@ func main() {
 		handleAnalyze(*analyzeDemoPath, *analyzePlayerName, *analyzeSteamID, *analyzeDebug, *analyzeVerbose)
 	case "train":
 		trainCmd.Parse(os.Args[2:])
-		handleTrain(*trainDemoDir, *trainConfigPath, true, true)
+		handleTrain(*trainDemoDir, *trainConfigPath, *analyzeDebug, *analyzeVerbose)
 	case "predict":
 		predictCmd.Parse(os.Args[2:])
-		handlePredict(*predictDemoPath, *predictPlayerName, *predictSteamID, true, true)
+		handlePredict(*predictDemoPath, *predictPlayerName, *predictSteamID, *analyzeDebug, *analyzeVerbose)
 	case "inspect-vpk":
 		inspectVPKCmd.Parse(os.Args[2:])
-		handleInspectVPK(*vpkPath, *outputDir, *mapName)
+		handleInspectVPK(*path, *outputDir, *mapName, *recursive)
 	default:
 		fmt.Printf("%q is not valid command.\n", os.Args[1])
 		os.Exit(1)
 	}
 }
 
-func handleInspectVPK(vpkPath, outputDir, mapName string) {
-	if vpkPath == "" {
-		log.Fatal("Please provide a VPK file path")
+func handleInspectVPK(path, outputDir, mapName string, recursive bool) {
+	if path == "" {
+		log.Fatal("Please provide a VPK file path or directory")
 	}
 
-	// Create output directory if needed
 	if outputDir == "" {
 		outputDir = filepath.Join(os.TempDir(), "cs2coach_bsp_test")
 	}
@@ -81,40 +78,14 @@ func handleInspectVPK(vpkPath, outputDir, mapName string) {
 		log.Fatalf("Failed to create output directory: %v", err)
 	}
 
-	fmt.Printf("Inspecting VPK: %s\n", vpkPath)
+	loader := parser.NewBSPLoader(path)
 
-	// Open the VPK file (using OpenAny for standalone VPKs)
-	pak, err := vpk.OpenAny(vpkPath)
+	_, err := loader.LoadBSPForMap(mapName)
 	if err != nil {
-		log.Fatalf("Failed to open VPK: %v", err)
+		log.Fatalf("Failed to find BSP for map %s: %v", mapName, err)
 	}
-	defer pak.Close()
 
-	// Iterate over entries
-	for _, entry := range pak.Entries() {
-		fmt.Printf("Found entry: %s (size: %d bytes)\n", entry.Filename(), entry.Length())
-
-		if strings.HasSuffix(entry.Filename(), ".bsp") {
-			outputFile := filepath.Join(outputDir, filepath.Base(entry.Filename()))
-			reader, err := entry.Open()
-			if err != nil {
-				log.Fatalf("Failed to open entry: %v", err)
-			}
-			defer reader.Close()
-
-			outFile, err := os.Create(outputFile)
-			if err != nil {
-				log.Fatalf("Failed to create output file: %v", err)
-			}
-			defer outFile.Close()
-
-			_, err = io.Copy(outFile, reader)
-			if err != nil {
-				log.Fatalf("Failed to extract BSP: %v", err)
-			}
-			fmt.Printf("Extracted BSP to: %s\n", outputFile)
-		}
-	}
+	fmt.Printf("Successfully loaded BSP for map %s\n", mapName)
 }
 
 func handleAnalyze(demoPath, playerName, steamID string, debug, verbose bool) {
@@ -139,27 +110,21 @@ func handleAnalyze(demoPath, playerName, steamID string, debug, verbose bool) {
 	}
 	fmt.Printf("Map detected in demo: %s\n", mapName)
 
-	// Step 2: Locate and load the correct VPK file
-	cs2Path := p.GetCS2Path()
-	mapVPKPath := filepath.Join(cs2Path, "maps", mapName+".vpk")
-	bspLoader := parser.NewBSPLoader(cs2Path)
+	// Step 2: Locate and load the correct map files
+	//cs2Path := p.GetCS2Path()
+	//mapDir := filepath.Join(cs2Path, "maps", mapName)
+	tempDir := filepath.Join(os.TempDir(), "cs2coach_bsp", "maps", mapName)
+	fmt.Printf("Using extracted map files from: %s\n", tempDir)
 
-	var bspChecker *parser.BSPVisibilityChecker
-	if fileExists(mapVPKPath) {
-		// Use map-specific VPK
-		fmt.Printf("Using map-specific VPK: %s\n", mapVPKPath)
-		bspChecker, err = bspLoader.LoadBSPFromSpecificVPK(mapVPKPath, mapName)
-	} else {
-		// Fallback to pak01_dir.vpk
-		fmt.Println("Map-specific VPK not found; falling back to pak01_dir.vpk")
-		bspChecker, err = bspLoader.LoadBSPForMap(mapName)
+	bspChecker := &parser.BSPVisibilityChecker{}
+
+	if err := bspChecker.LoadSource2MapFiles(tempDir); err != nil {
+		log.Fatalf("Failed to load visibility data for map %s: %v", mapName, err)
 	}
 
-	if err != nil {
-		log.Fatalf("Failed to load BSP for map %s: %v", mapName, err)
-	}
+	// Attach the visibility checker to the parser
 	p.SetBSPChecker(bspChecker)
-	fmt.Printf("Successfully loaded BSP data for map: %s\n", mapName)
+	fmt.Printf("Successfully loaded visibility data for map: %s\n", mapName)
 
 	// Step 3: Analyze the parsed match data
 	a := analyzer.NewAnalyzer()

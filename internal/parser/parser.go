@@ -63,6 +63,7 @@ type Parser struct {
 	flashedPlayers     map[uint64]time.Time // Track flashed players
 	frameStorage       FrameStorage
 	bspChecker         *BSPVisibilityChecker
+	warnedBspChecker   bool // Tracks if the warning has been logged
 }
 
 func NewParser(debug bool) *Parser {
@@ -99,6 +100,7 @@ func (p *Parser) GetOrCreatePlayerStats(steamID uint64, name string) *models.Pla
 }
 
 func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
+	// Open the demo file
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -115,19 +117,34 @@ func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
 		fmt.Println("Starting demo parse...")
 	}
 
+	// Parse the header to get initial map info
+	header, err := p.parser.ParseHeader()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse demo header: %v", err)
+	}
+
+	// Attempt to extract map name from the header
+	mapName := header.MapName
+	if mapName != "" {
+		p.match.MapName = mapName
+		if debug {
+			fmt.Printf("Map detected from demo header: %s\n", mapName)
+		}
+	} else if debug {
+		fmt.Println("Map name not found in demo header; will attempt to extract from events.")
+	}
+
+	// Parse events to potentially populate the map name if not found in the header
 	if err := p.parser.ParseToEnd(); err != nil {
 		return nil, fmt.Errorf("parse error: %v", err)
 	}
 
+	// Confirm the map name is populated
 	if p.match.MapName == "" {
-		p.match.MapName = "Unknown Map"
-		if debug {
-			fmt.Println("Warning: Could not determine map name")
-		}
-		return p.match, nil
+		return nil, fmt.Errorf("unable to determine map name from demo file")
 	}
 
-	// Find CS2 path and load BSP data
+	// Load BSP data
 	cs2Path := p.GetCS2Path()
 	if cs2Path == "" {
 		if debug {
@@ -140,15 +157,16 @@ func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
 	bspChecker, err := loader.LoadBSPForMap(p.match.MapName)
 	if err != nil {
 		if debug {
-			fmt.Printf("Warning: Failed to load BSP data for map %s: %v\n",
-				p.match.MapName, err)
+			fmt.Printf("Warning: Failed to load BSP data for map %s: %v\n", p.match.MapName, err)
 		}
-		return p.match, nil
+	} else {
+		p.bspChecker = bspChecker
+		if debug {
+			fmt.Printf("Successfully loaded BSP data for map %s\n", p.match.MapName)
+		}
 	}
 
-	p.bspChecker = bspChecker
 	if debug {
-		fmt.Printf("Successfully loaded BSP data for map %s\n", p.match.MapName)
 		fmt.Printf("Finished parsing. Found %d events\n", len(p.match.Events))
 	}
 
@@ -170,10 +188,6 @@ func (p *Parser) GetCS2Path() string {
 	return "" // Path not found
 }
 
-func magnitude(v r3.Vector) float64 {
-	return math.Sqrt(v.X*v.X + v.Y*v.Y + v.Z*v.Z)
-}
-
 func (p *Parser) registerEventHandlers(debug bool) {
 	p.parser.RegisterNetMessageHandler(p.handleServerInfo)
 	p.parser.RegisterEventHandler(p.handleMatchStart)
@@ -190,6 +204,42 @@ func (p *Parser) registerEventHandlers(debug bool) {
 	p.parser.RegisterEventHandler(p.handleFlashEvent)
 }
 
+func (p *Parser) handleRoundStart(e events.RoundStart) {
+	// Reset round-specific data
+	p.lastKnownHP = make(map[uint64]int)
+	p.enemySpottedTime = make(map[uint64]map[uint64]time.Time)
+	p.firstDamageTime = make(map[uint64]map[uint64]time.Time)
+	p.flashedPlayers = make(map[uint64]time.Time)
+	p.smokePositions = []r3.Vector{}
+
+	// Update player stats for the new round
+	for _, player := range p.parser.GameState().Participants().Playing() {
+		if player.SteamID64 == 0 {
+			continue
+		}
+
+		stats := p.match.GetOrCreatePlayerStats(player.SteamID64, player.Name)
+		stats.IsAlive = true
+		stats.RoundsActive++
+
+		// Initialize HP to 100 for all players
+		p.lastKnownHP[player.SteamID64] = 100
+	}
+
+	if p.debug {
+		fmt.Printf("Round %d started at tick %d\n", p.parser.GameState().TotalRoundsPlayed(), p.parser.GameState().IngameTick())
+	}
+
+	// Add round_start event to match events
+	p.match.AddEvent(models.Event{
+		Type: "round_start",
+		Data: map[string]interface{}{
+			"timestamp":    time.Now().Unix(),
+			"round_number": p.parser.GameState().TotalRoundsPlayed(),
+		},
+	})
+}
+
 func (p *Parser) handleFlashEvent(e events.PlayerFlashed) {
 	if (!p.isLiveGameRound()) || e.Player == nil {
 		return
@@ -204,6 +254,9 @@ func (p *Parser) handleFlashEvent(e events.PlayerFlashed) {
 
 func (p *Parser) handleServerInfo(msg *msgs2.CSVCMsg_ServerInfo) {
 	p.match.MapName = msg.GetMapName()
+	if p.debug {
+		fmt.Printf("Map name detected from server info: %s\n", p.match.MapName)
+	}
 }
 
 func (p *Parser) handleMatchStart(e events.MatchStart) {
@@ -378,7 +431,8 @@ func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 func (p *Parser) rayVisible(obs PlayerFrameData, tgt PlayerFrameData) bool {
 	if p.bspChecker != nil {
 		visible := p.bspChecker.IsVisible(obs.Position, tgt.Position)
-		fmt.Printf("BSP visibility check from (%v,%v,%v) to (%v,%v,%v): %v\n",
+		fmt.Printf("Visibility check from (%v) to (%v): %v\n", obs.Position, tgt.Position, visible)
+		fmt.Printf("Source 2 visibility check from (%v,%v,%v) to (%v,%v,%v): %v\n",
 			obs.Position.X, obs.Position.Y, obs.Position.Z,
 			tgt.Position.X, tgt.Position.Y, tgt.Position.Z,
 			visible)
@@ -391,22 +445,22 @@ func (p *Parser) rayVisible(obs PlayerFrameData, tgt PlayerFrameData) bool {
 		return false
 	}
 
-	// 3) Basic distance check
+	// Basic distance check
 	dist := tgt.Position.Sub(obs.Position).Norm()
 	if dist > 2000 {
 		return false
 	}
 
-	// 4) Angle check
+	// Angle check
 	angleToTarget := calcAngleBetween(obs.Position, tgt.Position)
 	angleDiff := float32(math.Abs(float64(angleToTarget - obs.ViewAngleX)))
 
-	// Possibly handle wrap-around of angles here (e.g., 359 vs 0)
+	// Handle wrap-around angles (e.g., 359 vs 0)
 	if angleDiff > 180 {
 		angleDiff = 360 - angleDiff
 	}
 
-	// If attacker needs the target in ~60° FOV:
+	// Require target to be within ~60° FOV
 	if angleDiff > 60 {
 		return false
 	}
@@ -530,39 +584,34 @@ func (p *Parser) handleActivity(e events.PlayerHurt) {
 }
 
 func (p *Parser) handleWeaponFire(e events.WeaponFire) {
-	if (!p.isLiveGameRound()) || e.Shooter == nil || e.Shooter.SteamID64 == 0 {
+	if !p.isLiveGameRound() || e.Shooter == nil || e.Shooter.SteamID64 == 0 {
 		return
 	}
 
 	stats := p.match.GetOrCreatePlayerStats(e.Shooter.SteamID64, e.Shooter.Name)
-
-	if stats.Velocity == nil {
-		stats.Velocity = make(map[string]float64)
-	}
-	if stats.TimeToFirstDamage == nil {
-		stats.TimeToFirstDamage = make([]float64, 0)
-	}
-
 	stats.ShotsTotal++
-
-	enemySpotted := false
 
 	shooterID := e.Shooter.SteamID64
 	currentTick := p.parser.GameState().IngameTick()
+	enemySpotted := false
 
 	for _, enemy := range p.parser.GameState().Participants().Playing() {
-		// Skip same or invalid team
 		if enemy.Team == e.Shooter.Team || enemy.SteamID64 == 0 {
 			continue
 		}
 
-		firstVisibleTick, found := p.findFirstVisibleTick(shooterID, enemy.SteamID64, currentTick, 64 /* ~2s if 32 ticks/sec */)
+		firstVisibleTick, found := p.findFirstVisibleTick(shooterID, enemy.SteamID64, currentTick, 64)
+		fmt.Printf("Shooter: %s, Target: %s, Visible: %v, SpottedShots: %d\n", e.Shooter.Name, enemy.Name, found, stats.EnemySpottedShots)
 
 		if found {
 			enemySpotted = true
-			timeInView := float64(currentTick-firstVisibleTick) / 64.0 // or 32 if 32 ticks/second
-			fmt.Printf("Attacker saw target for ~%.2f seconds before shooting.\n", timeInView)
+			timeInView := float64(currentTick-firstVisibleTick) / 64.0 // Assuming ~64 ticks/sec
 			stats.TimeToFirstShot = append(stats.TimeToFirstShot, timeInView)
+
+			if p.debug {
+				fmt.Printf("Shooter: %s saw enemy for %.2f seconds before firing. Total spotted shots: %d\n",
+					e.Shooter.Name, timeInView, stats.EnemySpottedShots+1)
+			}
 		}
 	}
 
@@ -570,45 +619,32 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 		stats.EnemySpottedShots++
 	}
 
-	// Track spray control
-	if p.currentSprayShots[e.Shooter.SteamID64] > 0 {
+	// Track spray shots
+	if p.frameStorage.frames != nil {
 		stats.SprayShots++
 	}
 
 	// Track counter-strafing
-	shooter := e.Shooter
-	currentVel := magnitude(shooter.Velocity())
-	prevVel := stats.Velocity[shooter.Name]
-
+	prevVel := stats.Velocity[e.Shooter.Name]
+	currentVel := magnitude(e.Shooter.Velocity())
 	if prevVel > 100 && currentVel < 20 {
 		stats.CounterStrafedShots++
 	}
-
-	p.lastWeaponFireTime[e.Shooter.SteamID64] = time.Now()
+	stats.Velocity[e.Shooter.Name] = currentVel
 }
 
 func (p *Parser) findFirstVisibleTick(attackerID, victimID uint64, currentTick, maxLookback int) (int, bool) {
-	// Iterate backward from the last stored frames
-	// TODO: could be a binary search if we store frames sorted by tick.
-	foundTick := -1
 	for i := len(p.frameStorage.frames) - 1; i >= 0; i-- {
 		fd := p.frameStorage.frames[i]
 		if fd.Tick < currentTick-maxLookback {
-			// we've gone too far back
 			break
 		}
-		// if in this frame, the victim was visible to attacker
 		if visibleMap, ok := fd.VisibilityMap[attackerID]; ok {
 			if visibleMap[victimID] {
-				foundTick = fd.Tick
+				return fd.Tick, true
 			}
 		}
 	}
-
-	if foundTick >= 0 {
-		return foundTick, true
-	}
-
 	return -1, false
 }
 
@@ -618,148 +654,49 @@ func (p *Parser) isLiveGameRound() bool {
 }
 
 func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
-	currentRound := p.parser.GameState().TotalRoundsPlayed()
-	if p.debug {
-		fmt.Printf("Processing damage event in round %d\n", currentRound)
-	}
-
-	if (!p.isLiveGameRound()) || e.Attacker == nil || e.Player == nil ||
-		e.Attacker.SteamID64 == 0 || e.Player.SteamID64 == 0 {
-		fmt.Printf("Skipping damage event, isLiveGameRound=%v, attacker=%v, player=%v\n",
-			p.isLiveGameRound(), e.Attacker != nil, e.Player != nil)
+	if !p.isLiveGameRound() || e.Attacker == nil || e.Player == nil || e.Attacker.SteamID64 == 0 || e.Player.SteamID64 == 0 {
 		return
 	}
 
-	// Debug info
-	killerName := "unknown"
-	victimName := "unknown"
-	if e.Attacker != nil {
-		killerName = e.Attacker.Name
-	}
-	if e.Player != nil {
-		victimName = e.Player.Name
-	}
-
-	if killerName == "shmeeny" {
-		fmt.Printf("Damage Event:\n")
-		fmt.Printf("  Attacker: %s (Team: %v)\n", killerName, e.Attacker.Team)
-		fmt.Printf("  Victim: %s (Team: %v, Alive: %v)\n", victimName, e.Player.Team, e.Player.IsAlive())
-		fmt.Printf("  Damage: %d\n", min(e.HealthDamage, e.Player.Health()))
-		fmt.Printf("  Weapon: %v\n", e.Weapon.Type)
-		fmt.Printf("  Round State: Warmup=%v, Freeze=%v\n", p.parser.GameState().IsWarmupPeriod(), p.parser.GameState().IsFreezetimePeriod())
-		fmt.Printf("  Current Round: %d\n\n", p.parser.GameState().TotalRoundsPlayed())
-	}
-
 	stats := p.match.GetOrCreatePlayerStats(e.Attacker.SteamID64, e.Attacker.Name)
-
-	currentTick := p.parser.GameState().IngameTick()
-	_, found := p.findFirstVisibleTick(e.Attacker.SteamID64, e.Player.SteamID64, currentTick, 64)
-	if found {
-		stats.EnemySpottedHits++
-		// TODO: track time to first damage here
-	}
-
-	// exclude bomb damage
-	if e.Weapon.Type != common.EqBomb {
-		victimID := e.Player.SteamID64
-
-		// Track damage for assists
-		if e.Attacker.Team != e.Player.Team && e.Attacker.SteamID64 != e.Player.SteamID64 {
-			if _, exists := p.lastDamageBy[e.Player.SteamID64]; !exists {
-				p.lastDamageBy[e.Player.SteamID64] = make(map[uint64]int)
-			}
-			p.lastDamageBy[e.Player.SteamID64][e.Attacker.SteamID64] += e.HealthDamage
-		}
-
-		// "Old HP" we have stored
-		oldHP := p.lastKnownHP[victimID]
-
-		// Potential bullet damage from the event
-		rawDamage := e.HealthDamage
-
-		// Net actual HP lost is at most what the victim had left
-		actualDamage := min(rawDamage, oldHP)
-
-		// Don't count friendly fire or self damage toward the players total damage done
-		if e.Attacker.Team != e.Player.Team && e.Attacker.SteamID64 != e.Player.SteamID64 {
-			stats.TotalDamage += actualDamage
-		}
-
-		// Deduct from victim's stored HP
-		newHP := max(oldHP-actualDamage, 0)
-		p.lastKnownHP[victimID] = newHP
-	}
-
 	stats.HitsTotal++
 
 	if e.HitGroup == events.HitGroupHead {
 		stats.Headshots++
 	}
 
-	// Track spray hits
-	if p.currentSprayShots[e.Attacker.SteamID64] > 0 {
-		stats.SprayHits++
+	victimID := e.Player.SteamID64
+	oldHP := p.lastKnownHP[victimID]
+	actualDamage := min(e.HealthDamage, oldHP)
+
+	if e.Attacker.Team != e.Player.Team && e.Attacker.SteamID64 != e.Player.SteamID64 {
+		stats.TotalDamage += actualDamage
 	}
+
+	p.lastKnownHP[victimID] = max(oldHP-actualDamage, 0)
 
 	// Track time to damage
-	if spottedTime, wasSpotted := p.enemySpottedTime[e.Attacker.SteamID64][e.Player.SteamID64]; wasSpotted {
-		if _, alreadyDamaged := p.firstDamageTime[e.Attacker.SteamID64][e.Player.SteamID64]; !alreadyDamaged {
-			timeToHit := time.Since(spottedTime).Seconds()
-			stats.TimeToFirstDamage = append(stats.TimeToFirstDamage, timeToHit)
+	if p.bspChecker != nil {
+		if spottedTime, wasSpotted := p.enemySpottedTime[e.Attacker.SteamID64][victimID]; wasSpotted {
+			if _, alreadyDamaged := p.firstDamageTime[e.Attacker.SteamID64][victimID]; !alreadyDamaged {
+				timeToHit := time.Since(spottedTime).Seconds()
+				stats.TimeToFirstDamage = append(stats.TimeToFirstDamage, timeToHit)
 
-			if _, exists := p.firstDamageTime[e.Attacker.SteamID64]; !exists {
-				p.firstDamageTime[e.Attacker.SteamID64] = make(map[uint64]time.Time)
+				if _, exists := p.firstDamageTime[e.Attacker.SteamID64]; !exists {
+					p.firstDamageTime[e.Attacker.SteamID64] = make(map[uint64]time.Time)
+				}
+				p.firstDamageTime[e.Attacker.SteamID64][victimID] = time.Now()
+
+				if p.debug {
+					fmt.Printf("Attacker %s saw victim %s for %.2f seconds before hitting.\n",
+						e.Attacker.Name, e.Player.Name, timeToHit)
+				}
 			}
-			p.firstDamageTime[e.Attacker.SteamID64][e.Player.SteamID64] = time.Now()
 		}
+	} else if p.debug && !p.warnedBspChecker {
+		fmt.Println("Warning: bspChecker is nil, skipping visibility checks for damage events.")
+		p.warnedBspChecker = true
 	}
-}
-
-func (p *Parser) handleRoundStart(e events.RoundStart) {
-	p.roundStartTime = time.Now()
-	p.alivePlayersByTeam = make(map[int]int)
-	p.currentRoundKills = make(map[uint64]map[int]int)         // Reset multi-kill tracking
-	p.sprayStartTime = make(map[uint64]time.Time)              // Reset spray tracking
-	p.currentSprayShots = make(map[uint64]int)                 // Reset spray shots
-	p.enemySpottedTime = make(map[uint64]map[uint64]time.Time) // Reset spotted time
-	p.firstDamageTime = make(map[uint64]map[uint64]time.Time)  // Reset damage time
-	p.lastWeaponFireTime = make(map[uint64]time.Time)          // Reset weapon fire time
-	p.lastDamageBy = make(map[uint64]map[uint64]int)           // Reset damage tracking
-
-	// Reset all player damage counts
-	for _, player := range p.parser.GameState().Participants().Playing() {
-		if player.SteamID64 == 0 {
-			continue
-		}
-		stats := p.match.GetOrCreatePlayerStats(player.SteamID64, player.Name)
-		stats.IsAlive = true
-		p.alivePlayersByTeam[int(player.Team)]++
-
-		// Reset player health to 100 on round start
-		p.lastKnownHP[player.SteamID64] = 100
-
-		if p.parser.GameState().IsWarmupPeriod() {
-			stats.TotalDamage = 0 //Ensure that we don't count warmup damage
-			stats.SurvivalByPhase = make(map[string]int)
-			stats.RoundsActive = 0
-			stats.Kills = 0
-			stats.Deaths = 0
-			stats.Assists = 0
-			continue
-		}
-
-		if !p.parser.GameState().IsWarmupPeriod() {
-			stats.RoundsActive++
-		}
-	}
-
-	p.match.AddEvent(models.Event{
-		Type: "round_start",
-		Data: map[string]interface{}{
-			"timestamp":    p.roundStartTime.Unix(),
-			"round_number": p.parser.GameState().TotalRoundsPlayed(),
-		},
-	})
 }
 
 func (p *Parser) handleRoundEnd(e events.RoundEnd) {
@@ -883,5 +820,14 @@ func distancePointToLine(point, lineStart, lineEnd r3.Vector) float64 {
 }
 
 func (p *Parser) SetBSPChecker(bspChecker *BSPVisibilityChecker) {
+	if bspChecker == nil {
+		fmt.Println("Warning: BSPChecker is nil.")
+	} else {
+		fmt.Println("BSPChecker successfully initialized.")
+	}
 	p.bspChecker = bspChecker
+}
+
+func magnitude(v r3.Vector) float64 {
+	return math.Sqrt(v.X*v.X + v.Y*v.Y + v.Z*v.Z)
 }

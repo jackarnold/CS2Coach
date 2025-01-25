@@ -76,7 +76,10 @@ type Leaf struct {
 }
 
 type BSPVisibilityChecker struct {
-	bspData *BSPData
+	bspData        *BSPData
+	visibilityData []byte
+	worldData      []byte
+	physicsData    []byte
 }
 
 // Lump IDs for Source 2 BSP format
@@ -103,32 +106,85 @@ func NewBSPLoader(cs2Path string) *BSPLoader {
 	}
 }
 
-// LoadBSPForMap attempts to load the BSP for the given map name, trying multiple sources
+func (b *BSPVisibilityChecker) LoadSource2MapFiles(mapDir string) error {
+	vvisPath := filepath.Join(mapDir, "world_visibility.vvis_c")
+	vwrldPath := filepath.Join(mapDir, "world.vwrld_c")
+	vphysPath := filepath.Join(mapDir, "world_physics.vphys_c")
+
+	fmt.Printf("Loading visibility file: %s\n", vvisPath)
+
+	// Check and load visibility data
+	if err := b.LoadVVISData(vvisPath); err != nil {
+		return fmt.Errorf("failed to load visibility data: %v", err)
+	}
+
+	// Optionally load additional files for advanced features
+	if _, err := os.Stat(vwrldPath); err == nil {
+		b.worldData, _ = os.ReadFile(vwrldPath)
+	}
+	if _, err := os.Stat(vphysPath); err == nil {
+		b.physicsData, _ = os.ReadFile(vphysPath)
+	}
+
+	return nil
+}
+
+func (b *BSPVisibilityChecker) LoadVVISData(vvisPath string) error {
+	data, err := os.ReadFile(vvisPath)
+	if err != nil {
+		return fmt.Errorf("failed to read visibility data: %v", err)
+	}
+
+	// Parse visibility data (adjust parsing logic for Source 2 as needed)
+	b.visibilityData = data
+	return nil
+}
+
+// LoadBSPForMap updated to work with Source 2 map files
 func (l *BSPLoader) LoadBSPForMap(mapName string) (*BSPVisibilityChecker, error) {
-	// Check if CS2 path exists
+	fmt.Printf("Attempting to load BSP for map %s\n", mapName)
+	fmt.Printf("CS2 Path: %s\n", l.cs2Path)
+	fmt.Printf("Maps Path: %s\n", l.mapsPath)
+
 	if !fileExists(l.cs2Path) {
 		return nil, fmt.Errorf("CS2 path not found: %s", l.cs2Path)
 	}
 
-	// Create temp directory if needed
 	if err := os.MkdirAll(l.tempDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create temp dir: %v", err)
 	}
 
-	// Try both potential VPK locations
-	vpkPaths := []string{
-		filepath.Join(l.cs2Path, "pak01_dir.vpk"),
-		filepath.Join(l.cs2Path, "maps"),
-	}
-
-	for _, vpkPath := range vpkPaths {
-		err := extractBSPFromVPK(vpkPath, mapName, l.tempDir)
-		if err == nil {
-			return loadBSPFromFile(filepath.Join(l.tempDir, mapName+".bsp"))
+	// First try map-specific VPK
+	mapVPKPath := filepath.Join(l.cs2Path, "maps", mapName+".vpk")
+	if fileExists(mapVPKPath) {
+		if err := l.processVPKFile(mapVPKPath, mapName, l.tempDir); err == nil {
+			// Successfully found and extracted map files
+			checker := &BSPVisibilityChecker{}
+			if err := checker.LoadSource2MapFiles(l.tempDir); err != nil {
+				return nil, fmt.Errorf("failed to load Source 2 map files: %v", err)
+			}
+			return checker, nil
 		}
 	}
 
-	return nil, fmt.Errorf("failed to extract BSP from any VPK location")
+	// Try pak01_dir.vpk and numbered VPKs
+	files, err := os.ReadDir(l.cs2Path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CS2 directory: %v", err)
+	}
+
+	for _, file := range files {
+		if !file.IsDir() && strings.HasPrefix(strings.ToLower(file.Name()), "pak01_") &&
+			strings.HasSuffix(strings.ToLower(file.Name()), ".vpk") {
+			vpkPath := filepath.Join(l.cs2Path, file.Name())
+			if err := l.processVPKFile(vpkPath, mapName, l.tempDir); err == nil {
+				// Successfully found and extracted map files
+				return &BSPVisibilityChecker{}, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("Map files not found in any VPK file")
 }
 
 // Update NewBSPVisibilityChecker to use the loader
@@ -170,26 +226,198 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-func extractBSPFromVPK(vpkPath, mapName, outputDir string) error {
-	vpkPath = strings.TrimRight(vpkPath, "\\/")
+func (l *BSPLoader) ExtractBSPFromPath(path, mapName, outputDir string, recursive bool) error {
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("failed to access path: %v", err)
+	}
 
-	fmt.Printf("Attempting to extract %s from %s\n", mapName, vpkPath)
+	if fileInfo.IsDir() {
+		return l.processDirectory(path, mapName, outputDir, recursive)
+	}
+	return l.processVPKFile(path, mapName, outputDir)
+}
+
+func (l *BSPLoader) processDirectory(dirPath, mapName, outputDir string, recursive bool) error {
+	// Try to open the directory as a VPK directory using pak01_dir.vpk as the base
+	pak01Path := filepath.Join(dirPath, "pak01_dir.vpk")
+	if fileExists(pak01Path) {
+		pak, err := vpk.OpenDir(dirPath)
+		if err == nil {
+			defer pak.Close()
+			fmt.Printf("Processing VPK directory using: %s\n", dirPath)
+			if err := l.extractBSPFiles(pak, mapName, outputDir); err != nil {
+				fmt.Printf("Error processing directory: %v\n", err)
+			}
+			return nil
+		}
+		fmt.Printf("Could not open directory as VPK: %v\n", err)
+	}
+
+	if !recursive {
+		return fmt.Errorf("not a VPK directory and recursive flag not set")
+	}
+
+	return filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if pak, err := vpk.OpenDir(path); err == nil {
+				defer pak.Close()
+				return l.extractBSPFiles(pak, mapName, outputDir)
+			}
+			return nil
+		}
+		if strings.HasSuffix(strings.ToLower(info.Name()), ".vpk") {
+			return l.processVPKFile(path, mapName, outputDir)
+		}
+		return nil
+	})
+}
+
+func (l *BSPLoader) processVPKFile(vpkPath, mapName, outputDir string) error {
+	pak, err := vpk.OpenAny(vpkPath)
+	if err != nil {
+		return fmt.Errorf("failed to open VPK %s: %v", vpkPath, err)
+	}
+	defer pak.Close()
+
+	requiredFiles := []string{
+		fmt.Sprintf("maps/%s/world_visibility.vvis_c", mapName),
+		fmt.Sprintf("maps/%s/world.vwrld_c", mapName),
+		fmt.Sprintf("maps/%s/world_physics.vphys_c", mapName),
+	}
+
+	foundFiles := make(map[string]vpk.Entry)
+
+	for _, entry := range pak.Entries() {
+		entryPath := strings.ToLower(entry.Filename())
+		for _, reqFile := range requiredFiles {
+			if entryPath == strings.ToLower(reqFile) {
+				foundFiles[reqFile] = entry
+				fmt.Printf("Found required file: %s\n", entry.Filename())
+			}
+		}
+	}
+
+	// Extract all found files
+	for _, entry := range foundFiles {
+		if err := l.extractMapFile(entry, outputDir); err != nil {
+			fmt.Printf("Warning: failed to extract %s: %v\n", entry.Filename(), err)
+		}
+	}
+
+	// Check if we found all required files
+	if len(foundFiles) >= 2 { // Need at least world and physics files
+		return nil
+	}
+
+	return fmt.Errorf("Not all required map files found")
+}
+
+func (l *BSPLoader) extractMapFile(entry vpk.Entry, outputDir string) error {
+	fullPath := filepath.Join(outputDir, entry.Filename())
+
+	// Create all parent directories
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		return fmt.Errorf("failed to create directories: %v", err)
+	}
+
+	outFile, err := os.Create(fullPath)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %v", err)
+	}
+	defer outFile.Close()
+
+	reader, err := entry.Open()
+	if err != nil {
+		return fmt.Errorf("failed to open entry: %v", err)
+	}
+	defer reader.Close()
+
+	written, err := io.Copy(outFile, reader)
+	if err != nil {
+		return fmt.Errorf("failed to write file: %v", err)
+	}
+
+	fmt.Printf("Extracted %s (%d bytes)\n", fullPath, written)
+	return nil
+}
+
+func (l *BSPLoader) extractBSPFiles(pak vpk.VPK, mapName, outputDir string) error {
+	fmt.Printf("Searching for BSP files in VPK entries...\n")
+	mapPattern := strings.ToLower(mapName + ".bsp")
+
+	for _, entry := range pak.Entries() {
+		fmt.Printf("Examining entry: %s\n", entry.Filename())
+		if !strings.HasSuffix(strings.ToLower(entry.Filename()), ".bsp") {
+			continue
+		}
+
+		if mapName != "" && !strings.Contains(strings.ToLower(entry.Filename()), mapPattern) {
+			fmt.Printf("Skipping non-matching BSP: %s\n", entry.Filename())
+			continue
+		}
+
+		if !entry.FilenameSafeWindows() && !entry.FilenameSafeUnix() {
+			fmt.Printf("Skipping unsafe filename: %s\n", entry.Filename())
+			continue
+		}
+
+		if err := l.extractBSPFile(entry, outputDir); err != nil {
+			fmt.Printf("Error extracting %s: %v\n", entry.Filename(), err)
+		}
+	}
+	return nil
+}
+
+func (l *BSPLoader) extractBSPFile(entry vpk.Entry, outputDir string) error {
+	fmt.Printf("Found BSP: %s (size: %d bytes, CRC: %x) in Path: %s\n",
+		entry.Filename(), entry.Length(), entry.CRC(), entry.Path())
+
+	reader, err := entry.Open()
+	if err != nil {
+		return fmt.Errorf("failed to open entry: %v", err)
+	}
+	defer reader.Close()
+
+	outputFile := filepath.Join(outputDir, filepath.Base(entry.Filename()))
+	outFile, err := os.Create(outputFile)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %v", err)
+	}
+	defer outFile.Close()
+
+	written, err := io.Copy(outFile, reader)
+	if err != nil {
+		return fmt.Errorf("failed to extract BSP: %v", err)
+	}
+
+	fmt.Printf("Extracted BSP to: %s (%d bytes)\n", outputFile, written)
+	return nil
+}
+
+func extractBSPFromVPK(vpkPath, mapName, outputDir string) error {
 	pak, err := vpk.OpenAny(vpkPath)
 	if err != nil {
 		return fmt.Errorf("failed to open VPK: %v", err)
 	}
 	defer pak.Close()
 
+	// Add more potential path patterns
 	paths := []string{
-		fmt.Sprintf("maps\\%s.bsp", mapName),
-		fmt.Sprintf("maps\\bsp\\%s.bsp", mapName),
+		fmt.Sprintf("maps/%s.bsp", mapName),
+		fmt.Sprintf("maps/bsp/%s.bsp", mapName),
+		fmt.Sprintf("maps/%s/%s.bsp", mapName, mapName),
+		strings.ToLower(fmt.Sprintf("maps/%s.bsp", mapName)),
 	}
 
 	var foundEntry vpk.Entry
 	for _, entry := range pak.Entries() {
-		fmt.Printf("Found entry: %s\n", entry.Filename())
+		entryPath := strings.ToLower(entry.Filename())
 		for _, path := range paths {
-			if strings.EqualFold(entry.Filename(), path) {
+			if strings.EqualFold(entryPath, strings.ToLower(path)) {
 				foundEntry = entry
 				break
 			}
@@ -200,7 +428,7 @@ func extractBSPFromVPK(vpkPath, mapName, outputDir string) error {
 	}
 
 	if foundEntry == nil {
-		return fmt.Errorf("map BSP not found in VPK")
+		return fmt.Errorf("map BSP not found in VPK (searched paths: %v)", paths)
 	}
 
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
@@ -229,18 +457,25 @@ func extractBSPFromVPK(vpkPath, mapName, outputDir string) error {
 }
 
 func (b *BSPVisibilityChecker) IsVisible(from, to r3.Vector) bool {
-	start := Vector3{
-		X: float32(from.X),
-		Y: float32(from.Y),
-		Z: float32(from.Z),
+	// Convert to Vector3 for BSP functions
+	start := Vector3{float32(from.X), float32(from.Y), float32(from.Z)}
+	end := Vector3{float32(to.X), float32(to.Y), float32(to.Z)}
+
+	// First check basic frustum
+	direction := to.Sub(from)
+	distance := direction.Norm()
+	if distance > 2000 {
+		return false
 	}
 
-	end := Vector3{
-		X: float32(to.X),
-		Y: float32(to.Y),
-		Z: float32(to.Z),
+	// Check if either point is in a solid leaf
+	startLeaf := b.bspData.findLeaf(start, 0)
+	endLeaf := b.bspData.findLeaf(end, 0)
+	if startLeaf.Contents&1 != 0 || endLeaf.Contents&1 != 0 {
+		return false
 	}
 
+	// Trace line through BSP tree
 	return b.bspData.CheckLineOfSight(start, end)
 }
 
