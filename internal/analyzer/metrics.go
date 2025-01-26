@@ -73,7 +73,7 @@ func CalculateLeetifyMetrics(stats *models.PlayerStats, roundCount int) *models.
 
 	// Counter-strafing percentage
 	if stats.ShotsTotal > 0 {
-		metrics.CounterStrafing = float64(stats.CounterStrafedShots) / float64(stats.RifleShots) * 100
+		metrics.CounterStrafing = float64(stats.CounterStrafedShots) / float64(stats.MovingRifleShots) * 100
 	}
 
 	// Time to Damage

@@ -865,12 +865,13 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 	shooterID := e.Shooter.SteamID64
 	currentTick := p.parser.GameState().IngameTick()
 	currentTime := time.Now()
+	currentVelocity := magnitude(e.Shooter.Velocity())
 	enemySpotted := false
 	var spottedVictimID uint64
 
 	// Check visibility using enemySpottedTime
 	for victimID, spottedTick := range p.enemySpottedTime[shooterID] {
-		if currentTick-spottedTick <= 128 { // Lookback window of 128 ticks (~2 seconds at 64 ticks per second)
+		if currentTick-spottedTick <= 128 { // Lookback window of ~2 seconds
 			enemySpotted = true
 			spottedVictimID = victimID
 			break
@@ -888,11 +889,9 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 	// Track spray timing
 	if p.isSprayableWeapon(e.Weapon.Class()) {
 		if p.debug {
-			fmt.Printf("[DEBUG] Weapon %s classified as sprayable for %s\n",
-				e.Weapon.Type, e.Shooter.Name)
+			fmt.Printf("[DEBUG] Weapon %s classified as sprayable for %s\n", e.Weapon.Type, e.Shooter.Name)
 		}
 
-		// Initialize spray tracking if needed
 		if _, exists := p.currentSprayShots[shooterID]; !exists {
 			p.currentSprayShots[shooterID] = 0
 			p.lastSprayTick[shooterID] = currentTick
@@ -902,28 +901,22 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 		}
 
 		// Check if the spray is within the defined tick window
-		sprayActive := currentTick-p.lastSprayTick[shooterID] <= p.sprayTickWindow
-		if sprayActive {
+		if currentTick-p.lastSprayTick[shooterID] <= p.sprayTickWindow {
 			if enemySpotted {
-				// Only count shots toward sprayShots if an enemy is spotted
 				p.currentSprayShots[shooterID]++
 				stats.SprayShots++
 
-				// Spray hit tracking happens only when an enemy is visible
 				if p.debug {
-					fmt.Printf("[DEBUG] Spray shot added for %s. SprayShots: %d\n",
-						e.Shooter.Name, stats.SprayShots)
+					fmt.Printf("[DEBUG] Spray shot added for %s. SprayShots: %d\n", e.Shooter.Name, stats.SprayShots)
 				}
 			}
 		} else {
-			// Reset spray tracking if the window is exceeded
 			p.currentSprayShots[shooterID] = 1
 		}
 		p.lastSprayTick[shooterID] = currentTick
 	}
 
-	currentVelocity := magnitude(e.Shooter.Velocity())
-
+	// Handle rifle shots and counter-strafing
 	if p.isRifle(e.Weapon.Class()) {
 		// Track moving rifle shots
 		if currentVelocity > 0.0 {
@@ -934,18 +927,33 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 			}
 		}
 
-		// Define "good" counter-strafing: velocity < 34% of weapon's max speed
+		// Counter-strafing detection: velocity < 34% of weapon's max speed
 		maxSpeed := p.getWeaponMaxSpeed(e.Weapon.Type)
-		if currentVelocity > 0.0 && currentVelocity < 0.34*float64(maxSpeed) && p.isRifle(e.Weapon.Class()) && !e.Shooter.IsDucking() && enemySpotted {
+		if currentVelocity > 0.0 && currentVelocity < 0.34*maxSpeed && !e.Shooter.IsDucking() && enemySpotted {
 			stats.CounterStrafedShots++
 			if p.debug {
 				fmt.Printf("[DEBUG] Counter-strafe detected for %s: velocity=%.2f, maxSpeed=%.2f\n",
 					e.Shooter.Name, currentVelocity, maxSpeed)
 			}
+		} else if p.debug {
+			if !enemySpotted {
+				fmt.Printf("[DEBUG] Counter-strafe skipped for %s: No spotted enemy.\n", e.Shooter.Name)
+			}
+			if currentVelocity == 0 {
+				fmt.Printf("[DEBUG] Counter-strafe skipped for %s: Player is stationary.\n", e.Shooter.Name)
+			}
+			if currentVelocity >= 0.34*maxSpeed {
+				fmt.Printf("[DEBUG] Counter-strafe skipped for %s: Velocity too high (%.2f > %.2f).\n",
+					e.Shooter.Name, currentVelocity, 0.34*maxSpeed)
+			}
+			if e.Shooter.IsDucking() {
+				fmt.Printf("[DEBUG] Counter-strafe skipped for %s: Player is crouching.\n", e.Shooter.Name)
+			}
 		}
 	}
-	stats.Velocity[e.Shooter.Name] = currentVelocity
 
+	// Store velocity for debugging/analysis
+	stats.Velocity[e.Shooter.Name] = currentVelocity
 	p.lastWeaponFireTime[shooterID] = currentTime
 }
 
