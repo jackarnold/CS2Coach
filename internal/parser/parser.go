@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/golang/geo/r3"
@@ -825,6 +826,30 @@ func (p *Parser) handleActivity(e events.PlayerHurt) {
 	}
 }
 
+// Check if the weapon is a rifle
+func (p *Parser) isRifle(weaponClass common.EquipmentClass) bool {
+	switch weaponClass {
+	case common.EqClassRifle:
+		return true
+	default:
+		return false
+	}
+}
+
+// Get the max movement speed for the given weapon
+func (p *Parser) getWeaponMaxSpeed(weaponType common.EquipmentType) float64 {
+	switch weaponType {
+	case common.EqAK47, common.EqM4A1, common.EqM4A4, common.EqAUG:
+		return 215.0 // Example max speed for rifles
+	case common.EqGalil:
+		return 210.0
+	case common.EqFamas:
+		return 220.0
+	default:
+		return 250.0 // Default fallback for unknown weapon types
+	}
+}
+
 func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 	if !p.isLiveGameRound() || e.Shooter == nil || e.Shooter.SteamID64 == 0 {
 		return
@@ -897,16 +922,29 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 		p.lastSprayTick[shooterID] = currentTick
 	}
 
-	// Improved counter-strafe detection
-	prevVel := stats.Velocity[e.Shooter.Name]
-	currentVel := magnitude(e.Shooter.Velocity())
-	if prevVel > 150 && currentVel < 20 { // Adjusted thresholds for counter-strafing
-		stats.CounterStrafedShots++
-		if p.debug {
-			fmt.Printf("[DEBUG] Counter-strafe shot detected for %s\n", e.Shooter.Name)
+	currentVelocity := magnitude(e.Shooter.Velocity())
+
+	if p.isRifle(e.Weapon.Class()) {
+		// Track moving rifle shots
+		if currentVelocity > 0.0 {
+			stats.MovingRifleShots++
+			if p.debug {
+				fmt.Printf("[DEBUG] Player %s fired a moving rifle shot. MovingRifleShots: %d\n",
+					e.Shooter.Name, stats.MovingRifleShots)
+			}
+		}
+
+		// Define "good" counter-strafing: velocity < 34% of weapon's max speed
+		maxSpeed := p.getWeaponMaxSpeed(e.Weapon.Type)
+		if currentVelocity > 0.0 && currentVelocity < 0.34*float64(maxSpeed) && p.isRifle(e.Weapon.Class()) && !e.Shooter.IsDucking() && enemySpotted {
+			stats.CounterStrafedShots++
+			if p.debug {
+				fmt.Printf("[DEBUG] Counter-strafe detected for %s: velocity=%.2f, maxSpeed=%.2f\n",
+					e.Shooter.Name, currentVelocity, maxSpeed)
+			}
 		}
 	}
-	stats.Velocity[e.Shooter.Name] = currentVel
+	stats.Velocity[e.Shooter.Name] = currentVelocity
 
 	p.lastWeaponFireTime[shooterID] = currentTime
 }
@@ -1000,7 +1038,11 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 
 				// Track ticks to first damage
 				ticksToHit := p.currentTick - spottedTick
-				stats.TimeToFirstDamage = append(stats.TimeToFirstDamage, float64(ticksToHit))
+				timeToFirstDamage := float64(ticksToHit) / 64.0 * 1000 // Convert ticks to milliseconds
+
+				if timeToFirstDamage <= 1000 { // Exclude values > 1 second (trigger discipline)
+					stats.TimeToFirstDamage = append(stats.TimeToFirstDamage, timeToFirstDamage)
+				}
 
 				// Update firstDamageTime
 				if _, exists := p.firstDamageTime[e.Attacker.SteamID64]; !exists {
@@ -1009,8 +1051,8 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 				p.firstDamageTime[e.Attacker.SteamID64][victimID] = p.currentTick
 
 				if p.debug && e.Attacker.Name == "shmeeny" {
-					fmt.Printf("[DEBUG] Attacker %s saw victim %s for %d ticks before hitting.\n",
-						e.Attacker.Name, e.Player.Name, ticksToHit)
+					fmt.Printf("[DEBUG] Attacker %s saw victim %s for %d ticks (%.2fms) before hitting.\n",
+						e.Attacker.Name, e.Player.Name, ticksToHit, timeToFirstDamage)
 				}
 			}
 		}
@@ -1018,6 +1060,21 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 		fmt.Println("[DEBUG] Warning: bspChecker is nil, skipping visibility checks for damage events.")
 		p.warnedBspChecker = true
 	}
+}
+
+func calculateMedian(values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	sorted := make([]float64, len(values))
+	copy(sorted, values)
+	sort.Float64s(sorted)
+
+	mid := len(sorted) / 2
+	if len(sorted)%2 == 0 {
+		return (sorted[mid-1] + sorted[mid]) / 2
+	}
+	return sorted[mid]
 }
 
 func (p *Parser) handleRoundEnd(e events.RoundEnd) {
@@ -1052,6 +1109,8 @@ func (p *Parser) handleRoundEnd(e events.RoundEnd) {
 				stats.SurvivalByPhase["late"]++
 			}
 		}
+
+		stats.MedianTTD = calculateMedian(stats.TimeToFirstDamage)
 	}
 
 	if p.debug {

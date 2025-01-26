@@ -25,6 +25,8 @@ type PlayerStats struct {
 	FirstBulletHits     int
 	FirstBulletShots    int
 	CrosshairPlacement  []float64
+	MedianTTD           float64
+	MovingRifleShots    int // Tracks only rifle shots
 
 	// Trade metrics
 	TradeKills               int

@@ -73,16 +73,20 @@ func CalculateLeetifyMetrics(stats *models.PlayerStats, roundCount int) *models.
 
 	// Counter-strafing percentage
 	if stats.ShotsTotal > 0 {
-		metrics.CounterStrafing = float64(stats.CounterStrafedShots) / float64(stats.ShotsTotal) * 100
+		metrics.CounterStrafing = float64(stats.CounterStrafedShots) / float64(stats.RifleShots) * 100
 	}
 
-	// Time to damage - Average time between spotting and hitting enemies
-	if len(stats.TimeToFirstDamage) > 0 {
+	// Time to Damage
+	if stats.MedianTTD > 0 {
+		// Use the median Time to Damage if available
+		metrics.TimeToFirstDamage = stats.MedianTTD
+	} else if len(stats.TimeToFirstDamage) > 0 {
+		// Fallback to average Time to Damage
 		sum := 0.0
 		for _, time := range stats.TimeToFirstDamage {
 			sum += time
 		}
-		metrics.TimeToFirstDamage = (sum / float64(len(stats.TimeToFirstDamage))) * 1000 // Convert to ms
+		metrics.TimeToFirstDamage = sum / float64(len(stats.TimeToFirstDamage))
 	}
 
 	// Trade metrics
