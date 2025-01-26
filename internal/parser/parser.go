@@ -295,7 +295,7 @@ func (p *Parser) handleRoundStart(e events.RoundStart) {
 	p.alivePlayersByTeam = make(map[int]int)
 	p.currentRoundKills = make(map[uint64]map[int]int)
 	p.sprayStartTime = make(map[uint64]time.Time)
-	p.currentSprayShots = make(map[uint64]int)
+	//p.currentSprayShots = make(map[uint64]int)
 	p.lastSprayTick = make(map[uint64]int)
 	p.enemySpottedTime = make(map[uint64]map[uint64]int)
 	p.firstDamageTime = make(map[uint64]map[uint64]int)
@@ -844,12 +844,6 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 	const minVisibilityDuration = 0.1 // Minimum 100ms visibility required
 	const lookbackTicks = 128         // Doubled from 64 for better accuracy
 
-	// Initialize maps if needed
-	if _, exists := p.currentSprayShots[shooterID]; !exists {
-		p.currentSprayShots[shooterID] = 0
-		p.lastSprayTick[shooterID] = currentTick
-	}
-
 	for _, enemy := range p.parser.GameState().Participants().Playing() {
 		if enemy.Team == e.Shooter.Team || enemy.SteamID64 == 0 {
 			continue
@@ -866,6 +860,11 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 				stats.TimeToFirstShot = append(stats.TimeToFirstShot, timeInView)
 
 				if p.debug {
+					fmt.Printf("[DEBUG] findFirstVisibleTick check - Shooter: %d, FirstVisibleTick: %d, Found: %v, TimeInView: %.2f, MinDuration: %.2f\n",
+						shooterID, firstVisibleTick, found, timeInView, minVisibilityDuration)
+				}
+
+				if p.debug {
 					fmt.Printf("[DEBUG] Shooter: %s saw enemy for %.2f seconds before firing. Next SpottedShots => %d\n",
 						e.Shooter.Name, timeInView, stats.EnemySpottedShots+1)
 				}
@@ -880,26 +879,53 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 				e.Shooter.Name, stats.EnemySpottedShots)
 		}
 
-		// Check spray timing
-		if p.isSprayableWeapon(e.Weapon.Class()) {
-			fmt.Printf("[DEBUG] handleWeaponFire: Weapon %s classified as sprayable\n", e.Weapon.Type)
-			// 32 ticks = ~500ms at 64 tick rate
-			if currentTick-p.lastSprayTick[shooterID] <= p.sprayTickWindow {
-				p.currentSprayShots[shooterID]++
-				// Once we're in a spray (3+ shots), count all shots
-				if p.currentSprayShots[shooterID] >= 3 {
-					stats.SprayShots++
-					if p.debug {
-						fmt.Printf("[DEBUG] Spray shot detected for %s. Count: %d, Total: %d\n",
-							e.Shooter.Name, p.currentSprayShots[shooterID], stats.SprayShots)
-					}
-				}
-			} else {
-				// Reset spray count if time window exceeded
-				p.currentSprayShots[shooterID] = 1
-			}
-			p.lastSprayTick[shooterID] = currentTick
+	}
+
+	// Check spray timing
+	if p.isSprayableWeapon(e.Weapon.Class()) {
+		if p.debug {
+			fmt.Printf("[DEBUG] Weapon %s classified as sprayable for %s\n",
+				e.Weapon.Type, e.Shooter.Name)
 		}
+
+		// Initialize if needed
+		if _, exists := p.currentSprayShots[shooterID]; !exists {
+			p.currentSprayShots[shooterID] = 0
+			p.lastSprayTick[shooterID] = currentTick
+			if p.debug {
+				fmt.Printf("[DEBUG] Initializing spray tracking for %s\n", e.Shooter.Name)
+			}
+		}
+
+		if currentTick-p.lastSprayTick[shooterID] <= p.sprayTickWindow {
+			p.currentSprayShots[shooterID]++
+
+			// Once we're in a spray (3+ shots), count all shots
+			if p.currentSprayShots[shooterID] >= 3 { // Keep threshold at 3 for Leetify
+				stats.SprayShots++
+				if p.debug {
+					fmt.Printf("[DEBUG] Spray shot detected for %s (shots: %d total: %d hits: %d)\n",
+						e.Shooter.Name, p.currentSprayShots[shooterID], stats.SprayShots, stats.SprayHits)
+				}
+			}
+		} else {
+			// Reset counter if window exceeded
+			if p.debug {
+				fmt.Printf("[DEBUG] Resetting spray count for %s (window exceeded)\n",
+					e.Shooter.Name)
+			}
+			p.currentSprayShots[shooterID] = 1
+		}
+		p.lastSprayTick[shooterID] = currentTick
+	} else {
+		// Reset spray counting when losing enemy visibility
+		delete(p.currentSprayShots, shooterID)
+		delete(p.lastSprayTick, shooterID)
+	}
+
+	if p.debug {
+		fmt.Printf("[DEBUG] Spray state - ID: %d, EnemySpotted: %v, CurrentShots: %d, SprayShots: %d, SprayHits: %d\n",
+			shooterID, enemySpotted, p.currentSprayShots[shooterID], stats.SprayShots, stats.SprayHits)
 	}
 
 	// Improved counter-strafe detection
@@ -1004,13 +1030,12 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 
 		// Check if this hit was part of a spray
 		if p.isSprayableWeapon(e.Weapon.Class()) {
-			fmt.Printf("[DEBUG] handlePlayerHurt: Weapon %s classified as sprayable\n", e.Weapon.Type)
 			attackerID := e.Attacker.SteamID64
-			if p.currentSprayShots[attackerID] >= 3 {
+			if count, exists := p.currentSprayShots[attackerID]; exists && count >= 3 {
 				stats.SprayHits++
 				if p.debug {
-					fmt.Printf("[DEBUG] Spray hit by %s (total: %d)\n",
-						e.Attacker.Name, stats.SprayHits)
+					fmt.Printf("[DEBUG] Spray hit by %s (shots: %d hits: %d total: %d)\n",
+						e.Attacker.Name, p.currentSprayShots[attackerID], stats.SprayHits, stats.SprayShots)
 				}
 			}
 		}
