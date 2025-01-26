@@ -841,54 +841,33 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 	currentTick := p.parser.GameState().IngameTick()
 	currentTime := time.Now()
 	enemySpotted := false
-	const minVisibilityDuration = 0.1 // Minimum 100ms visibility required
-	const lookbackTicks = 128         // Doubled from 64 for better accuracy
+	var spottedVictimID uint64
 
-	for _, enemy := range p.parser.GameState().Participants().Playing() {
-		if enemy.Team == e.Shooter.Team || enemy.SteamID64 == 0 {
-			continue
-		}
-
-		firstVisibleTick, found := p.findFirstVisibleTick(shooterID, enemy.SteamID64, currentTick, lookbackTicks)
-
-		if found {
-			timeInView := float64(currentTick-firstVisibleTick) / 64.0
-
-			// Only count as spotted if visible for minimum duration
-			if timeInView >= minVisibilityDuration {
-				enemySpotted = true
-				stats.TimeToFirstShot = append(stats.TimeToFirstShot, timeInView)
-
-				if p.debug {
-					fmt.Printf("[DEBUG] findFirstVisibleTick check - Shooter: %d, FirstVisibleTick: %d, Found: %v, TimeInView: %.2f, MinDuration: %.2f\n",
-						shooterID, firstVisibleTick, found, timeInView, minVisibilityDuration)
-				}
-
-				if p.debug {
-					fmt.Printf("[DEBUG] Shooter: %s saw enemy for %.2f seconds before firing. Next SpottedShots => %d\n",
-						e.Shooter.Name, timeInView, stats.EnemySpottedShots+1)
-				}
-			}
+	// Check visibility using enemySpottedTime
+	for victimID, spottedTick := range p.enemySpottedTime[shooterID] {
+		if currentTick-spottedTick <= 128 { // Lookback window of 128 ticks (~2 seconds at 64 ticks per second)
+			enemySpotted = true
+			spottedVictimID = victimID
+			break
 		}
 	}
 
 	if enemySpotted {
 		stats.EnemySpottedShots++
 		if p.debug {
-			fmt.Printf("[DEBUG] handleWeaponFire: %s => EnemySpottedShots incremented to %d\n",
-				e.Shooter.Name, stats.EnemySpottedShots)
+			fmt.Printf("[DEBUG] handleWeaponFire: Shooter %s spotted victim %d and EnemySpottedShots incremented to %d\n",
+				e.Shooter.Name, spottedVictimID, stats.EnemySpottedShots)
 		}
-
 	}
 
-	// Check spray timing
+	// Track spray timing
 	if p.isSprayableWeapon(e.Weapon.Class()) {
 		if p.debug {
 			fmt.Printf("[DEBUG] Weapon %s classified as sprayable for %s\n",
 				e.Weapon.Type, e.Shooter.Name)
 		}
 
-		// Initialize if needed
+		// Initialize spray tracking if needed
 		if _, exists := p.currentSprayShots[shooterID]; !exists {
 			p.currentSprayShots[shooterID] = 0
 			p.lastSprayTick[shooterID] = currentTick
@@ -897,89 +876,39 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 			}
 		}
 
-		if currentTick-p.lastSprayTick[shooterID] <= p.sprayTickWindow {
-			p.currentSprayShots[shooterID]++
-
-			// Once we're in a spray (3+ shots), count all shots
-			if p.currentSprayShots[shooterID] >= 3 { // Keep threshold at 3 for Leetify
+		// Check if the spray is within the defined tick window
+		sprayActive := currentTick-p.lastSprayTick[shooterID] <= p.sprayTickWindow
+		if sprayActive {
+			if enemySpotted {
+				// Only count shots toward sprayShots if an enemy is spotted
+				p.currentSprayShots[shooterID]++
 				stats.SprayShots++
+
+				// Spray hit tracking happens only when an enemy is visible
 				if p.debug {
-					fmt.Printf("[DEBUG] Spray shot detected for %s (shots: %d total: %d hits: %d)\n",
-						e.Shooter.Name, p.currentSprayShots[shooterID], stats.SprayShots, stats.SprayHits)
+					fmt.Printf("[DEBUG] Spray shot added for %s. SprayShots: %d\n",
+						e.Shooter.Name, stats.SprayShots)
 				}
 			}
 		} else {
-			// Reset counter if window exceeded
-			if p.debug {
-				fmt.Printf("[DEBUG] Resetting spray count for %s (window exceeded)\n",
-					e.Shooter.Name)
-			}
+			// Reset spray tracking if the window is exceeded
 			p.currentSprayShots[shooterID] = 1
 		}
 		p.lastSprayTick[shooterID] = currentTick
-	} else {
-		// Reset spray counting when losing enemy visibility
-		delete(p.currentSprayShots, shooterID)
-		delete(p.lastSprayTick, shooterID)
-	}
-
-	if p.debug {
-		fmt.Printf("[DEBUG] Spray state - ID: %d, EnemySpotted: %v, CurrentShots: %d, SprayShots: %d, SprayHits: %d\n",
-			shooterID, enemySpotted, p.currentSprayShots[shooterID], stats.SprayShots, stats.SprayHits)
 	}
 
 	// Improved counter-strafe detection
 	prevVel := stats.Velocity[e.Shooter.Name]
 	currentVel := magnitude(e.Shooter.Velocity())
-	if prevVel > 150 && currentVel < 20 { // Adjusted thresholds
+	if prevVel > 150 && currentVel < 20 { // Adjusted thresholds for counter-strafing
 		stats.CounterStrafedShots++
+		if p.debug {
+			fmt.Printf("[DEBUG] Counter-strafe shot detected for %s\n", e.Shooter.Name)
+		}
 	}
 	stats.Velocity[e.Shooter.Name] = currentVel
 
 	p.lastWeaponFireTime[shooterID] = currentTime
-}
-
-func (p *Parser) findFirstVisibleTick(attackerID, victimID uint64, currentTick, maxLookback int) (int, bool) {
-	const minContinuousVisibleTicks = 4  // About 62.5ms at 64 tick
-	const minVisibilityDuration = 0.0625 // 62.5ms minimum visibility
-
-	continuousVisibleTicks := 0
-	firstVisibleTick := -1
-	lastVisibleTick := -1
-
-	// Search backwards in frameStorage
-	for i := len(p.frameStorage.frames) - 1; i >= 0; i-- {
-		fd := p.frameStorage.frames[i]
-		if fd.Tick < currentTick-maxLookback {
-			break
-		}
-
-		if visibleMap, ok := fd.VisibilityMap[attackerID]; ok {
-			if visibleMap[victimID] {
-				continuousVisibleTicks++
-				lastVisibleTick = fd.Tick
-				if firstVisibleTick == -1 {
-					firstVisibleTick = fd.Tick
-				}
-			} else {
-				// Check if previous visibility duration was sufficient
-				if continuousVisibleTicks >= minContinuousVisibleTicks &&
-					float64(lastVisibleTick-firstVisibleTick)/64.0 >= minVisibilityDuration {
-					return firstVisibleTick, true
-				}
-				// Reset on visibility break
-				firstVisibleTick = -1
-				continuousVisibleTicks = 0
-			}
-		}
-	}
-
-	// Final check for continuous visibility until current tick
-	if continuousVisibleTicks >= minContinuousVisibleTicks &&
-		float64(lastVisibleTick-firstVisibleTick)/64.0 >= minVisibilityDuration {
-		return firstVisibleTick, true
-	}
-	return -1, false
 }
 
 func (p *Parser) isLiveGameRound() bool {
