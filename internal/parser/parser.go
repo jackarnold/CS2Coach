@@ -839,14 +839,14 @@ func (p *Parser) isRifle(weaponClass common.EquipmentClass) bool {
 // Get the max movement speed for the given weapon
 func (p *Parser) getWeaponMaxSpeed(weaponType common.EquipmentType) float64 {
 	switch weaponType {
-	case common.EqAK47, common.EqM4A1, common.EqM4A4, common.EqAUG:
-		return 215.0 // Example max speed for rifles
-	case common.EqGalil:
-		return 210.0
-	case common.EqFamas:
+	case common.EqAK47, common.EqGalil:
+		return 215.0
+	case common.EqM4A1, common.EqM4A4:
+		return 225.0
+	case common.EqFamas, common.EqAUG:
 		return 220.0
 	default:
-		return 250.0 // Default fallback for unknown weapon types
+		return 250.0 // Default fallback for unknown weapon types implement https://www.reddit.com/r/GlobalOffensive/comments/a28h8r/movement_speed_chart/
 	}
 }
 
