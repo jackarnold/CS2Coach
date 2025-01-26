@@ -131,7 +131,7 @@ func calculateSpottedAccuracy(stats *models.PlayerStats) float64 {
 	if stats.HitsTotal == 0 {
 		return 0.0 // Avoid division by zero
 	}
-	return float64(stats.EnemySpottedHits) / float64(stats.HitsTotal) * 100
+	return float64(stats.EnemySpottedHits) / float64(stats.EnemySpottedShots) * 100
 }
 
 func calculateAimSubScore(metrics *models.LeetifyMetrics) float64 {
