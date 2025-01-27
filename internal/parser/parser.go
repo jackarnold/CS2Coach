@@ -697,7 +697,8 @@ func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 						if spottedTick, ok := p.enemySpottedTime[obs.SteamID][tgt.SteamID]; ok {
 
 							// Retain lastVisibleTarget if within the buffer
-							if p.currentTick-spottedTick <= p.visibilityBufferTicks {
+							gracePeriod := 16 // ~250ms at 64 tick
+							if p.currentTick-spottedTick <= p.visibilityBufferTicks+gracePeriod {
 								p.lastVisibleTarget[obs.SteamID] = tgt.SteamID
 							} else {
 								delete(p.enemySpottedTime[obs.SteamID], tgt.SteamID)
