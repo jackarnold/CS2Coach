@@ -34,74 +34,27 @@ func CalculateLeetifyMetrics(stats *models.PlayerStats, roundCount int) *models.
 	games := float64(roundCount) / 30.0
 
 	// ADR - Total damage divided by rounds
-	fmt.Println("TotalDamage: " + fmt.Sprint(stats.TotalDamage))
-	fmt.Println("roundCount: " + fmt.Sprint(roundCount))
-	metrics.ADR = float64(stats.TotalDamage) / float64(roundCount)
+	calculateADR(stats, roundCount, metrics)
 
 	// Accuracy calculations
-	if stats.ShotsTotal > 0 {
-		// Overall accuracy
-		metrics.AccuracyAll = float64(stats.HitsTotal) / float64(stats.ShotsTotal) * 100
-
-		// Spotted accuracy - hits on spotted enemies / shots at spotted enemies
-		metrics.SpottedAccuracy = calculateSpottedAccuracy(stats)
-
-		// Old calculation for spotted accuracy commented out on purpose
-		//if stats.EnemySpottedShots > 0 {
-		//	metrics.SpottedAccuracy = float64(stats.EnemySpottedHits) / float64(stats.EnemySpottedShots) * 100
-		//}
-	}
+	calculateOverallAccuracy(stats, metrics)
+	calculateSpottedAccuracy(stats, metrics)
 
 	// Head accuracy and headshot percentage
-	if stats.HitsTotal > 0 {
-		metrics.HeadAccuracy = float64(stats.Headshots) / float64(stats.HitsTotal) * 100
-	}
-	if stats.Kills > 0 {
-		metrics.HeadshotKillPercentage = float64(stats.Headshots) / float64(stats.Kills) * 100
-	}
+	calculateHeadAccuracy(stats, metrics)
+	calculateHeadShotPct(stats, metrics)
 
 	// Spray control
-	if stats.SprayShots > 0 {
-		// Ensure values are within reasonable bounds
-		if stats.SprayHits <= stats.SprayShots {
-			metrics.SprayAccuracy = float64(stats.SprayHits) / float64(stats.SprayShots) * 100
-		} else {
-			// If hits somehow exceed shots, cap at 100%
-			metrics.SprayAccuracy = 100.0
-		}
-	}
+	calculateSprayAccuracy(stats, metrics)
 
 	// Counter-strafing percentage
-	if stats.ShotsTotal > 0 {
-		metrics.CounterStrafing = float64(stats.CounterStrafedShots) / float64(stats.MovingRifleShots) * 100
-	}
+	calculateCounterStrafing(stats, metrics)
 
 	// Time to Damage
-	if stats.MedianTTD > 0 {
-		// Use the median Time to Damage if available
-		metrics.TimeToFirstDamage = stats.MedianTTD
-	} else if len(stats.TimeToFirstDamage) > 0 {
-		// Fallback to average Time to Damage
-		sum := 0.0
-		for _, time := range stats.TimeToFirstDamage {
-			sum += time
-		}
-		metrics.TimeToFirstDamage = sum / float64(len(stats.TimeToFirstDamage))
-	}
+	calculateTimeToDamage(stats, metrics)
 
 	// Trade metrics
-	if stats.TradeKillOpportunities > 0 {
-		metrics.TradeKillAttemptRate = float64(stats.TradeKillAttempts) / float64(stats.TradeKillOpportunities) * 100
-	}
-	if stats.TradeKillAttempts > 0 {
-		metrics.TradeKillSuccessRate = float64(stats.TradeKills) / float64(stats.TradeKillAttempts) * 100
-	}
-	if stats.TradedDeathOpportunities > 0 {
-		metrics.TradedDeathAttemptRate = float64(stats.TradedDeathAttempts) / float64(stats.TradedDeathOpportunities) * 100
-	}
-	if stats.TradedDeathAttempts > 0 {
-		metrics.TradedDeathSuccessRate = float64(stats.TradedDeaths) / float64(stats.TradedDeathAttempts) * 100
-	}
+	calculateTradeMetrics(stats, metrics)
 
 	// Calculate HLTV Rating
 	killRating := float64(stats.Kills) / float64(roundCount) / 0.679
@@ -127,11 +80,85 @@ func CalculateLeetifyMetrics(stats *models.PlayerStats, roundCount int) *models.
 	return metrics
 }
 
-func calculateSpottedAccuracy(stats *models.PlayerStats) float64 {
-	if stats.HitsTotal == 0 {
-		return 0.0 // Avoid division by zero
+func calculateADR(stats *models.PlayerStats, roundCount int, metrics *models.LeetifyMetrics) {
+	fmt.Println("TotalDamage: " + fmt.Sprint(stats.TotalDamage))
+	fmt.Println("roundCount: " + fmt.Sprint(roundCount))
+	metrics.ADR = float64(stats.TotalDamage) / float64(roundCount)
+}
+
+func calculateTradeMetrics(stats *models.PlayerStats, metrics *models.LeetifyMetrics) {
+	if stats.TradeKillOpportunities > 0 {
+		metrics.TradeKillAttemptRate = float64(stats.TradeKillAttempts) / float64(stats.TradeKillOpportunities) * 100
 	}
-	return float64(stats.EnemySpottedHits) / float64(stats.EnemySpottedShots) * 100
+	if stats.TradeKillAttempts > 0 {
+		metrics.TradeKillSuccessRate = float64(stats.TradeKills) / float64(stats.TradeKillAttempts) * 100
+	}
+	if stats.TradedDeathOpportunities > 0 {
+		metrics.TradedDeathAttemptRate = float64(stats.TradedDeathAttempts) / float64(stats.TradedDeathOpportunities) * 100
+	}
+	if stats.TradedDeathAttempts > 0 {
+		metrics.TradedDeathSuccessRate = float64(stats.TradedDeaths) / float64(stats.TradedDeathAttempts) * 100
+	}
+}
+
+func calculateOverallAccuracy(stats *models.PlayerStats, metrics *models.LeetifyMetrics) {
+	if stats.ShotsTotal > 0 {
+		// Overall accuracy
+		metrics.AccuracyAll = float64(stats.HitsTotal) / float64(stats.ShotsTotal) * 100
+	}
+}
+
+func calculateHeadShotPct(stats *models.PlayerStats, metrics *models.LeetifyMetrics) {
+	if stats.Kills > 0 {
+		metrics.HeadshotKillPercentage = float64(stats.Headshots) / float64(stats.Kills) * 100
+	}
+}
+
+func calculateHeadAccuracy(stats *models.PlayerStats, metrics *models.LeetifyMetrics) {
+	if stats.HitsTotal > 0 {
+		metrics.HeadAccuracy = float64(stats.Headshots) / float64(stats.HitsTotal) * 100
+	}
+}
+
+func calculateSprayAccuracy(stats *models.PlayerStats, metrics *models.LeetifyMetrics) {
+	if stats.SprayShots > 0 {
+		// Ensure values are within reasonable bounds
+		if stats.SprayHits <= stats.SprayShots {
+			metrics.SprayAccuracy = float64(stats.SprayHits) / float64(stats.SprayShots) * 100
+		} else {
+			// If hits somehow exceed shots, cap at 100%
+			metrics.SprayAccuracy = 100.0
+		}
+	}
+}
+
+func calculateCounterStrafing(stats *models.PlayerStats, metrics *models.LeetifyMetrics) {
+	if stats.ShotsTotal > 0 {
+		metrics.CounterStrafing = float64(stats.CounterStrafedShots) / float64(stats.MovingRifleShots) * 100
+	}
+}
+
+func calculateTimeToDamage(stats *models.PlayerStats, metrics *models.LeetifyMetrics) {
+	if stats.MedianTTD > 0 {
+		// Use the median Time to Damage if available
+		metrics.TimeToFirstDamage = stats.MedianTTD
+	} else if len(stats.TimeToFirstDamage) > 0 {
+		// Fallback to average Time to Damage
+		sum := 0.0
+		for _, time := range stats.TimeToFirstDamage {
+			sum += time
+		}
+		metrics.TimeToFirstDamage = sum / float64(len(stats.TimeToFirstDamage))
+	}
+}
+
+func calculateSpottedAccuracy(stats *models.PlayerStats, metrics *models.LeetifyMetrics) {
+	if stats.HitsTotal == 0 {
+		metrics.SpottedAccuracy = 0.0 // Avoid division by zero
+		return
+	}
+
+	metrics.SpottedAccuracy = float64(stats.EnemySpottedHits) / float64(stats.EnemySpottedShots) * 100
 }
 
 func calculateAimSubScore(metrics *models.LeetifyMetrics) float64 {

@@ -32,9 +32,8 @@ type PlayerFrameData struct {
 }
 
 type FrameData struct {
-	Tick          int
-	Players       []PlayerFrameData
-	VisibilityMap map[uint64]map[uint64]bool // "is this observer -> target visible at this frame"
+	Tick    int
+	Players []PlayerFrameData
 }
 
 type FrameStorage struct {
@@ -45,6 +44,14 @@ type SpottedState struct {
 	LastSpottedTime time.Time
 	LastVisiblePos  r3.Vector
 	ViewAngle       float32
+}
+
+type GrenadeData struct {
+	Position      r3.Vector
+	EqType        common.EquipmentType
+	EntityId      int
+	DetonateTick  int
+	DurationTicks int
 }
 
 type Parser struct {
@@ -58,63 +65,86 @@ type Parser struct {
 	sprayStartTime    map[uint64]time.Time
 	currentSprayShots map[uint64]int
 	// Map of attacker -> (victim -> time that victim was first spotted this round)
-	enemySpottedTime   map[uint64]map[uint64]int
-	firstDamageTime    map[uint64]map[uint64]int
-	alivePlayersByTeam map[int]int
-	currentRoundKills  map[uint64]map[int]int
-	lastWeaponFireTime map[uint64]time.Time
-	angleHistory       map[uint64][]float32
-	lastKnownHP        map[uint64]int // steamID -> current HP
-	lastDamageBy       map[uint64]map[uint64]int
-	visibilityCache    map[uint64]map[uint64]bool // Short-term cache for expensive visibility checks
-	lastUpdateTime     time.Time
-	smokePositions     []r3.Vector          // Track active smoke positions
-	flashedPlayers     map[uint64]time.Time // Track flashed players
-	frameStorage       FrameStorage
-	BspChecker         *BSPVisibilityChecker
-	warnedBspChecker   bool // Tracks if the warning has been logged
-	lastProcessedTick  int
-	currentTick        int
-	visibilityStats    map[uint64]int
-	spottedStats       map[uint64]int
-	mapNameFound       bool
-	sprayThreshold     time.Duration
-	playerStatsCache   map[uint64]*models.PlayerStats // Centralized cache for player stats
-	lastSprayTick      map[uint64]int                 // Last spray shot tick per player
-	sprayTickWindow    int                            // Ticks window for spray (12 ticks = ~200ms)
-	lastFrameTime      time.Time
+	enemySpottedTime      map[uint64]map[uint64]int
+	firstDamageTime       map[uint64]map[uint64]int
+	alivePlayersByTeam    map[int]int
+	currentRoundKills     map[uint64]map[int]int
+	lastWeaponFireTime    map[uint64]time.Time
+	angleHistory          map[uint64][]float32
+	lastKnownHP           map[uint64]int // steamID -> current HP
+	lastDamageBy          map[uint64]map[uint64]int
+	lastUpdateTime        time.Time
+	smokePositions        map[int]GrenadeData // Track active smoke positions
+	flashedPlayers        map[uint64]int      // Track the tick when a player is no longer flashed
+	frameStorage          FrameStorage
+	BspChecker            *BSPVisibilityChecker
+	warnedBspChecker      bool // Tracks if the warning has been logged
+	lastProcessedTick     int
+	currentTick           int
+	visibilityStats       map[uint64]int
+	spottedStats          map[uint64]int
+	mapNameFound          bool
+	sprayThreshold        time.Duration
+	playerStatsCache      map[uint64]*models.PlayerStats // Centralized cache for player stats
+	lastSprayTick         map[uint64]int                 // Last spray shot tick per player
+	sprayTickWindow       int                            // Ticks window for spray (12 ticks = ~200ms)
+	lastFrameTime         time.Time
+	visibilityBufferTicks int
+	lastVisibleTarget     map[uint64]uint64 // Maps shooterID -> last seen victimID
 }
 
 func NewParser(debug bool) *Parser {
 	return &Parser{
-		debug:              debug,
-		match:              models.NewMatch(),
-		lastDamageBy:       make(map[uint64]map[uint64]int),
-		alivePlayersByTeam: make(map[int]int),
-		currentRoundKills:  make(map[uint64]map[int]int),
-		sprayStartTime:     make(map[uint64]time.Time),
-		currentSprayShots:  make(map[uint64]int),
-		enemySpottedTime:   make(map[uint64]map[uint64]int),
-		firstDamageTime:    make(map[uint64]map[uint64]int),
-		lastWeaponFireTime: make(map[uint64]time.Time),
-		angleHistory:       make(map[uint64][]float32),
-		lastKnownHP:        make(map[uint64]int),
-		visibilityCache:    make(map[uint64]map[uint64]bool),
-		visibilityStats:    make(map[uint64]int),
-		spottedStats:       make(map[uint64]int),
-		flashedPlayers:     make(map[uint64]time.Time),
-		lastProcessedTick:  -1,
-		frameStorage:       FrameStorage{frames: make([]FrameData, 0)},
-		mapNameFound:       false,
-		sprayThreshold:     200 * time.Millisecond,
-		playerStatsCache:   make(map[uint64]*models.PlayerStats),
-		lastSprayTick:      make(map[uint64]int),
-		sprayTickWindow:    64, // ~1000ms at 64 tick
+		debug:                 debug,
+		match:                 models.NewMatch(),
+		lastDamageBy:          make(map[uint64]map[uint64]int),
+		alivePlayersByTeam:    make(map[int]int),
+		currentRoundKills:     make(map[uint64]map[int]int),
+		sprayStartTime:        make(map[uint64]time.Time),
+		currentSprayShots:     make(map[uint64]int),
+		enemySpottedTime:      make(map[uint64]map[uint64]int),
+		firstDamageTime:       make(map[uint64]map[uint64]int),
+		lastWeaponFireTime:    make(map[uint64]time.Time),
+		angleHistory:          make(map[uint64][]float32),
+		lastKnownHP:           make(map[uint64]int),
+		visibilityStats:       make(map[uint64]int),
+		spottedStats:          make(map[uint64]int),
+		flashedPlayers:        make(map[uint64]int),
+		lastProcessedTick:     -1,
+		frameStorage:          FrameStorage{frames: make([]FrameData, 0)},
+		mapNameFound:          false,
+		sprayThreshold:        200 * time.Millisecond,
+		playerStatsCache:      make(map[uint64]*models.PlayerStats),
+		lastSprayTick:         make(map[uint64]int),
+		sprayTickWindow:       64, // ~1s at 64 tick
+		visibilityBufferTicks: 64, // ~X * 64 tickrate = seconds
+		lastVisibleTarget:     make(map[uint64]uint64),
+		smokePositions:        make(map[int]GrenadeData),
 	}
 }
 
 func (p *Parser) IsReady() bool {
 	return p.BspChecker != nil
+}
+
+func (p *Parser) createSmokeGrenadeData(grenadeEvent events.GrenadeEvent) *GrenadeData {
+	grenadeData := &GrenadeData{
+		Position:     grenadeEvent.Position,
+		EqType:       grenadeEvent.GrenadeType,
+		EntityId:     grenadeEvent.GrenadeEntityID,
+		DetonateTick: p.parser.GameState().IngameTick(),
+	}
+
+	return grenadeData
+}
+
+func (p *Parser) createFlashGrenadeData(flashEvent events.PlayerFlashed) *GrenadeData {
+	grenadeData := &GrenadeData{
+		DurationTicks: int(flashEvent.FlashDuration().Seconds()) * 64,
+		DetonateTick:  p.parser.GameState().IngameTick(),
+	}
+
+	return grenadeData
 }
 
 func (p *Parser) GetOrCreatePlayerStats(steamID uint64, name string) *models.PlayerStats {
@@ -296,6 +326,8 @@ func (p *Parser) registerEventHandlers(debug bool) {
 	p.parser.RegisterEventHandler(p.handlePeekTracking)
 	p.parser.RegisterEventHandler(p.handleFrameDone)
 	p.parser.RegisterEventHandler(p.handleFlashEvent)
+	p.parser.RegisterEventHandler(p.handleSmokeDetonate)
+	p.parser.RegisterEventHandler(p.handleSmokeExpire)
 }
 
 func (p *Parser) handleRoundStart(e events.RoundStart) {
@@ -313,8 +345,8 @@ func (p *Parser) handleRoundStart(e events.RoundStart) {
 	p.lastKnownHP = make(map[uint64]int)
 	p.enemySpottedTime = make(map[uint64]map[uint64]int)
 	p.firstDamageTime = make(map[uint64]map[uint64]int)
-	p.flashedPlayers = make(map[uint64]time.Time)
-	p.smokePositions = []r3.Vector{}
+	p.flashedPlayers = make(map[uint64]int)
+	p.smokePositions = make(map[int]GrenadeData)
 
 	// Update player stats for the new round
 	for _, player := range p.parser.GameState().Participants().Playing() {
@@ -368,10 +400,26 @@ func (p *Parser) handleFlashEvent(e events.PlayerFlashed) {
 		return
 	}
 
-	oldEnd, had := p.flashedPlayers[e.Player.SteamID64]
-	newEnd := time.Now().Add(e.Player.FlashDurationTime())
-	if !had || newEnd.After(oldEnd) {
-		p.flashedPlayers[e.Player.SteamID64] = newEnd
+	currentTick := p.parser.GameState().IngameTick()
+	flashDuration := int(e.Player.GetFlashDuration())
+	eventDuration := int(e.Player.GetFlashDuration() * 64) // CS2 has 64 ticks per second
+	flashEndTick := currentTick + eventDuration
+
+	// New flash event
+	if _, exists := p.flashedPlayers[e.Player.SteamID64]; !exists {
+		p.flashedPlayers[e.Player.SteamID64] = flashEndTick
+		fmt.Printf("[VISION HACKING] FlashEvent added for %s -- currentTick: %d flashEndTick: %d flashDurationSeconds: %d eventDuration: %d\n",
+			e.Player.Name, currentTick, flashEndTick, flashDuration, eventDuration)
+	} else if storedFlashEndTick, exists := p.flashedPlayers[e.Player.SteamID64]; exists {
+		// New flash event will go longer than the last
+		if storedFlashEndTick < flashEndTick {
+			p.flashedPlayers[e.Player.SteamID64] = flashEndTick
+			fmt.Printf("[VISION HACKING] FlashEvent extended for %s -- currentTick: %d storedFlashEndTick: %d flashEndTick: %d flashDurationSeconds: %d eventDuration: %d\n",
+				e.Player.Name, currentTick, storedFlashEndTick, flashEndTick, flashDuration, eventDuration)
+		} else {
+			fmt.Printf("[VISION HACKING] FlashEvent is older than existing flash event for %s -- currentTick: %d storedFlashEndTick: %d flashEndTick: %d\n",
+				e.Player.Name, currentTick, storedFlashEndTick, flashEndTick)
+		}
 	}
 }
 
@@ -570,10 +618,102 @@ func (p *Parser) updateMapAreaStats(e events.Kill) {
 }
 
 func (p *Parser) handleFrameDone(e events.FrameDone) {
-	p.updateSmokes(p.parser.GameState())
 	p.trackPerFramePlayerData(p.parser.GameState())
 }
 
+func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
+	currentTick := gs.IngameTick()
+
+	// Ensure p.lastVisibleTarget is initialized
+	if p.lastVisibleTarget == nil {
+		p.lastVisibleTarget = make(map[uint64]uint64)
+	}
+
+	for tick := p.lastProcessedTick + 1; tick <= currentTick; tick++ {
+		p.currentTick = tick
+
+		frameData := FrameData{
+			Tick:    p.currentTick,
+			Players: []PlayerFrameData{},
+		}
+
+		if p.enemySpottedTime == nil {
+			p.enemySpottedTime = make(map[uint64]map[uint64]int)
+		}
+
+		for _, player := range gs.Participants().Playing() {
+			if player.SteamID64 == 0 {
+				continue
+			}
+
+			currentPos := player.Position()
+			pFrame := PlayerFrameData{
+				SteamID:    player.SteamID64,
+				PlayerTeam: player.Team,
+				PlayerName: player.Name,
+				Position:   currentPos,
+				ViewAngleX: player.ViewDirectionX(),
+				IsAlive:    player.IsAlive(),
+			}
+			frameData.Players = append(frameData.Players, pFrame)
+
+			// Initialize sub-maps
+			if _, ok := p.enemySpottedTime[player.SteamID64]; !ok {
+				p.enemySpottedTime[player.SteamID64] = make(map[uint64]int)
+			}
+		}
+
+		// ensure our map parser isn't nil
+		if p.BspChecker != nil {
+			// Loop over the attackers/shooters
+			for i := range frameData.Players {
+				obs := frameData.Players[i]
+				if !obs.IsAlive {
+					continue
+				}
+
+				// Loop over the targets/victims
+				for j := range frameData.Players {
+					tgt := frameData.Players[j]
+					if obs.SteamID == tgt.SteamID || !tgt.IsAlive || obs.PlayerTeam == tgt.PlayerTeam {
+						continue
+					}
+
+					// Calculate visibility
+					fov := p.calculateFOV(obs.Position, tgt.Position, obs.ViewAngleX)
+					visible := fov <= 50 && p.rayVisible(obs, tgt)
+
+					if visible {
+						if _, ok := p.enemySpottedTime[obs.SteamID]; !ok {
+							p.enemySpottedTime[obs.SteamID] = make(map[uint64]int)
+						}
+						if _, alreadySpotted := p.enemySpottedTime[obs.SteamID][tgt.SteamID]; !alreadySpotted {
+							p.enemySpottedTime[obs.SteamID][tgt.SteamID] = p.currentTick
+						}
+
+						p.lastVisibleTarget[obs.SteamID] = tgt.SteamID // Always update last visible target if visible
+					} else {
+						// If they were seen recently but momentarily went hidden, don't reset if they are within a window of tolerance
+						if spottedTick, ok := p.enemySpottedTime[obs.SteamID][tgt.SteamID]; ok {
+
+							// Retain lastVisibleTarget if within the buffer
+							if p.currentTick-spottedTick <= p.visibilityBufferTicks {
+								p.lastVisibleTarget[obs.SteamID] = tgt.SteamID
+							} else {
+								delete(p.enemySpottedTime[obs.SteamID], tgt.SteamID)
+							}
+						}
+					}
+				}
+			}
+		}
+		p.frameStorage.frames = append(p.frameStorage.frames, frameData)
+	}
+
+	p.lastProcessedTick = currentTick
+}
+
+/*
 func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 	p.currentTick = gs.IngameTick()
 
@@ -730,6 +870,7 @@ func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 	// Store frameData in p.frameStorage
 	p.frameStorage.frames = append(p.frameStorage.frames, frameData)
 }
+*/
 
 func (p *Parser) calculateVelocity3D(currentPos, lastPos r3.Vector, timeDelta time.Duration) float64 {
 	if timeDelta == 0 {
@@ -785,26 +926,32 @@ func (p *Parser) rayVisible(obs PlayerFrameData, tgt PlayerFrameData) bool {
 
 	// FOV check only - remove the redundant angle checks
 	fov := p.calculateFOV(obs.Position, tgt.Position, obs.ViewAngleX)
-	if fov <= 50 && obs.PlayerName == "shmeeny" {
-		fmt.Printf("[DEBUG] FOV check: shmeeny -> target %d, FOV: %.2f\n",
-			tgt.SteamID, fov)
-	}
 	if fov > 50 {
+		return false
+	}
+
+	/*if fov <= 50 && obs.PlayerName == "shmeeny" {
+		fmt.Printf("[DEBUG] FOV check: shmeeny -> target %d, FOV: %.2f\n", tgt.SteamID, fov)
+	}*/
+
+	// Map visibility check
+	if p.BspChecker != nil && !p.BspChecker.IsVisible(obs.Position, tgt.Position) {
 		return false
 	}
 
 	// Only validate smoke and flash if FOV check passes
 	if p.isLineInSmoke(obs.Position, tgt.Position) {
+		if obs.PlayerName == "shmeeny" {
+			fmt.Printf("[VISION HACKING] Smoke blocked vision for shmeeny at tick %d\n", p.parser.GameState().IngameTick())
+		}
 		return false
 	}
 
 	if p.isPlayerFlashed(obs.SteamID) {
+		if obs.PlayerName == "shmeeny" {
+			fmt.Printf("[VISION HACKING] Flash blocked vision for shmeeny at tick %d\n", p.parser.GameState().IngameTick())
+		}
 		return false
-	}
-
-	// BSP check last since it's most expensive
-	if p.BspChecker != nil {
-		return p.BspChecker.IsVisible(obs.Position, tgt.Position)
 	}
 
 	return true
@@ -894,6 +1041,34 @@ func getUtilityValue(grenadeType common.EquipmentType) int {
 		return 600
 	default:
 		return 0
+	}
+}
+
+func (p *Parser) handleSmokeDetonate(e events.SmokeStart) {
+	if !p.isLiveGameRound() {
+		return
+	}
+
+	// Findout if this is a duplicate event we can ignore
+	if _, exists := p.smokePositions[e.GrenadeEvent.GrenadeEntityID]; !exists {
+		detonatedSmoke := *p.createSmokeGrenadeData(e.GrenadeEvent)
+		p.smokePositions[e.GrenadeEvent.GrenadeEntityID] = detonatedSmoke
+		fmt.Printf("[VISION HACKING] Adding detonated smoke -- Tick: %d EntityID: %d\n", detonatedSmoke.DetonateTick, detonatedSmoke.EntityId)
+	} else {
+		fmt.Printf("[VISION HACKING] Skipping duplicate SmokeStart Event -- EntityID: %d\n", e.GrenadeEvent.GrenadeEntityID)
+	}
+}
+
+func (p *Parser) handleSmokeExpire(e events.SmokeExpired) {
+	if !p.isLiveGameRound() {
+		return
+	}
+
+	if detonatedSmoke, exists := p.smokePositions[e.GrenadeEvent.GrenadeEntityID]; exists {
+		delete(p.smokePositions, detonatedSmoke.EntityId)
+		fmt.Printf("[VISION HACKING] Expired smoke -- DetonatedTick: %d CurrentTick: %d EntityID: %d\n", detonatedSmoke.DetonateTick, p.parser.GameState().IngameTick(), detonatedSmoke.EntityId)
+	} else {
+		fmt.Printf("[VISION HACKING] No smoke exists to expire -- EntityID: %d\n", e.GrenadeEvent.GrenadeEntityID)
 	}
 }
 
@@ -1022,45 +1197,54 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 		return
 	}
 
+	// Update the current tick
+	p.currentTick = p.parser.GameState().IngameTick()
+
 	stats := p.match.GetOrCreatePlayerStats(e.Shooter.SteamID64, e.Shooter.Name)
 	if stats == nil {
 		return
 	}
 
+	stats.ShotsTotal++
+
 	var currentVelocity float64
 	for _, player := range p.frameStorage.frames[len(p.frameStorage.frames)-1].Players {
 		if player.SteamID == e.Shooter.SteamID64 {
+			// TODO: Evaluate using Velocity3D here
 			currentVelocity = player.Velocity2D
 			break
 		}
 	}
 
-	stats.ShotsTotal++
-
 	shooterID := e.Shooter.SteamID64
-	currentTick := p.parser.GameState().IngameTick()
 	currentTime := time.Now()
 	enemySpotted := false
 	var spottedVictimID uint64
 
-	// Check visibility using enemySpottedTime
-	for victimID, spottedTick := range p.enemySpottedTime[shooterID] {
-		if currentTick-spottedTick <= 384 { // ~6 seconds at 64 tick
-			if e.Shooter.Name == "shmeeny" {
-				fmt.Printf("[DEBUG] Found recent visibility: victim %d was spotted at tick %d (diff: %d)\n",
-					victimID, spottedTick, currentTick-spottedTick)
+	if victimID, exists := p.lastVisibleTarget[shooterID]; exists {
+		if spottedTick, wasSpotted := p.enemySpottedTime[shooterID][victimID]; wasSpotted {
+			ticksSinceSpotted := p.currentTick - spottedTick
+			if ticksSinceSpotted >= 0 && ticksSinceSpotted <= p.visibilityBufferTicks {
+				stats.EnemySpottedShots++
+				enemySpotted = true
+				if p.debug {
+					fmt.Printf("[DEBUG] EnemySpottedShots incremented: %s shot at %d (ticksSinceSpotted: %d)\n",
+						e.Shooter.Name, victimID, ticksSinceSpotted)
+				}
+			} else if p.debug {
+				fmt.Printf("[DEBUG] Skipped EnemySpottedShots: %s shot at %d (ticksSinceSpotted: %d > visibilityBufferTicks: %d)\n",
+					e.Shooter.Name, victimID, ticksSinceSpotted, p.visibilityBufferTicks)
 			}
-			enemySpotted = true
-			spottedVictimID = victimID
-			break
 		}
+	} else if p.debug {
+		fmt.Printf("[DEBUG] No last visible target for shooter %s\n", e.Shooter.Name)
 	}
 
 	if enemySpotted {
 		if e.Shooter.Name == "shmeeny" {
 			fmt.Printf("[DEBUG] Incrementing EnemySpottedShots for shmeeny to %d\n", stats.EnemySpottedShots)
 		}
-		stats.EnemySpottedShots++
+
 		if p.debug {
 			fmt.Printf("[DEBUG] handleWeaponFire: Shooter %s spotted victim %d and EnemySpottedShots incremented to %d\n",
 				e.Shooter.Name, spottedVictimID, stats.EnemySpottedShots)
@@ -1075,14 +1259,14 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 
 		if _, exists := p.currentSprayShots[shooterID]; !exists {
 			p.currentSprayShots[shooterID] = 0
-			p.lastSprayTick[shooterID] = currentTick
+			p.lastSprayTick[shooterID] = p.currentTick
 			if p.debug {
 				fmt.Printf("[DEBUG] Initializing spray tracking for %s\n", e.Shooter.Name)
 			}
 		}
 
 		// Check if the spray is within the defined tick window
-		if currentTick-p.lastSprayTick[shooterID] <= p.sprayTickWindow {
+		if p.currentTick-p.lastSprayTick[shooterID] <= p.sprayTickWindow {
 			if enemySpotted {
 				p.currentSprayShots[shooterID]++
 				stats.SprayShots++
@@ -1093,11 +1277,11 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 			}
 		} else {
 			// Only reset if we've exceeded the window significantly
-			if currentTick-p.lastSprayTick[shooterID] > p.sprayTickWindow*2 {
+			if p.currentTick-p.lastSprayTick[shooterID] > p.sprayTickWindow*2 {
 				p.currentSprayShots[shooterID] = 1
 			}
 		}
-		p.lastSprayTick[shooterID] = currentTick
+		p.lastSprayTick[shooterID] = p.currentTick
 	}
 
 	// Handle rifle shots and counter-strafing
@@ -1213,43 +1397,47 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 
 	p.lastKnownHP[victimID] = max(oldHP-actualDamage, 0)
 
-	// Check if victim was previously spotted and track EnemySpottedHits
+	// Ensure our map parser is not nil
 	if p.BspChecker != nil {
+		// Check if victm was previously spotted by the attacker
 		if spottedTick, wasSpotted := p.enemySpottedTime[e.Attacker.SteamID64][victimID]; wasSpotted {
 			// Validate that the spotted time is within a valid timeframe
 			ticksSinceSpotted := p.currentTick - spottedTick
-			if ticksSinceSpotted <= 384 { // ~6 seconds at 64 tick rate
+			if ticksSinceSpotted >= 0 && ticksSinceSpotted <= p.visibilityBufferTicks {
 				stats.EnemySpottedHits++
-				if p.debug && e.Attacker.Name == "shmeeny" {
-					fmt.Printf("[DEBUG] handlePlayerHurt: %s spotted victim %d, hits incremented to %d\n",
-						e.Attacker.Name, victimID, stats.EnemySpottedHits)
+
+				if e.Attacker.Name == "shmeeny" {
+					fmt.Printf("[DEBUG] EnemySpottedHits incremented: %s hit %s (ticksSinceSpotted: %d)\n",
+						e.Attacker.Name, e.Player.Name, ticksSinceSpotted)
 				}
+
+				// Check if this is the first damage and track Time To Damage
+				if _, alreadyCounted := p.firstDamageTime[e.Attacker.SteamID64][victimID]; !alreadyCounted {
+					timeToFirstDamage := float64(ticksSinceSpotted) / 64.0 * 1000 // Convert ticks to milliseconds
+
+					if timeToFirstDamage <= 1000 { // Exclude values > 1 second (trigger discipline)
+						stats.TimeToFirstDamage = append(stats.TimeToFirstDamage, timeToFirstDamage)
+					}
+
+					// Update firstDamageTime
+					if _, exists := p.firstDamageTime[e.Attacker.SteamID64]; !exists {
+						p.firstDamageTime[e.Attacker.SteamID64] = make(map[uint64]int)
+					}
+					p.firstDamageTime[e.Attacker.SteamID64][victimID] = p.currentTick
+
+					if p.debug && e.Attacker.Name == "shmeeny" {
+						fmt.Printf("[DEBUG] Attacker %s saw victim %s for %d ticks (%.2fms) before hitting.\n",
+							e.Attacker.Name, e.Player.Name, ticksSinceSpotted, timeToFirstDamage)
+					}
+				}
+			} else if e.Attacker.Name == "shmeeny" {
+				fmt.Printf("[DEBUG] Skipped EnemySpottedHits: %s hit %s (ticksSinceSpotted: %d > buffer)\n",
+					e.Attacker.Name, e.Player.Name, ticksSinceSpotted)
 			}
-
-			// Check if this is the first damage and track Time To Damage
-			if _, alreadyCounted := p.firstDamageTime[e.Attacker.SteamID64][victimID]; !alreadyCounted {
-				ticksToHit := ticksSinceSpotted
-				timeToFirstDamage := float64(ticksToHit) / 64.0 * 1000 // Convert ticks to milliseconds
-
-				if timeToFirstDamage <= 1000 { // Exclude values > 1 second (trigger discipline)
-					stats.TimeToFirstDamage = append(stats.TimeToFirstDamage, timeToFirstDamage)
-				}
-
-				// Update firstDamageTime
-				if _, exists := p.firstDamageTime[e.Attacker.SteamID64]; !exists {
-					p.firstDamageTime[e.Attacker.SteamID64] = make(map[uint64]int)
-				}
-				p.firstDamageTime[e.Attacker.SteamID64][victimID] = p.currentTick
-
-				if p.debug && e.Attacker.Name == "shmeeny" {
-					fmt.Printf("[DEBUG] Attacker %s saw victim %s for %d ticks (%.2fms) before hitting.\n",
-						e.Attacker.Name, e.Player.Name, ticksToHit, timeToFirstDamage)
-				}
-			}
+		} else if p.debug && !p.warnedBspChecker {
+			fmt.Println("[DEBUG] Warning: bspChecker is nil, skipping visibility checks for damage events.")
+			p.warnedBspChecker = true
 		}
-	} else if p.debug && !p.warnedBspChecker {
-		fmt.Println("[DEBUG] Warning: bspChecker is nil, skipping visibility checks for damage events.")
-		p.warnedBspChecker = true
 	}
 }
 
@@ -1462,37 +1650,61 @@ func getMapArea(pos Point) string {
 }
 
 func (p *Parser) isPlayerFlashed(playerID uint64) bool {
-	if flashEndTime, exists := p.flashedPlayers[playerID]; exists {
-		// If now is *before* flashEndTime, the player is still flashed
-		return time.Now().Before(flashEndTime)
+	if flashEndTick, exists := p.flashedPlayers[playerID]; exists {
+		// If now is *before* flashEndTick, the player is still flashed
+		isFlashed := p.parser.GameState().IngameTick() < flashEndTick
+		if isFlashed {
+			fmt.Printf("[VISION HACKING] PlayerID: %d is flashed. Current Tick: %d flashEndTick: %d\n", playerID, p.parser.GameState().IngameTick(), flashEndTick)
+		}
+		return isFlashed
 	}
 	return false
 }
 
-func (p *Parser) updateSmokes(gameState dem.GameState) {
-	// Clear old smokes
-	p.smokePositions = nil
+func (p *Parser) isLineInSmoke(start, end r3.Vector) bool {
+	const (
+		smokeRadius = 180.0
+		bloomTicks  = 64 // ~1 second at 64 tick
+		segments    = 4
+	)
 
-	// Get all active smoke positions
-	for _, grenade := range gameState.GrenadeProjectiles() {
-		if grenade.WeaponInstance.Type == common.EqSmoke {
-			p.smokePositions = append(p.smokePositions, grenade.Position())
+	for _, smoke := range p.smokePositions {
+		// Skip smoke if it hasn't bloomed yet
+		ticksSinceDetonate := p.currentTick - smoke.DetonateTick
+		if ticksSinceDetonate < bloomTicks {
+			continue
+		}
+
+		// Rest of the line checking logic...
+		for i := 0; i <= segments; i++ {
+			t := float64(i) / float64(segments)
+			point := r3.Vector{
+				X: start.X + (end.X-start.X)*t,
+				Y: start.Y + (end.Y-start.Y)*t,
+				Z: start.Z + (end.Z-start.Z)*t,
+			}
+
+			if point.Sub(smoke.Position).Norm() < smokeRadius {
+				fmt.Printf("[VISION HACKING] Smoke blocked vision at tick %d (smoke age: %d ticks, EntityId: %d)\n", p.currentTick, ticksSinceDetonate, smoke.EntityId)
+				return true
+			}
 		}
 	}
+	return false
 }
 
-func (p *Parser) isLineInSmoke(start, end r3.Vector) bool {
+/*func (p *Parser) isLineInSmoke(start, end r3.Vector) bool {
 	for _, smokePos := range p.smokePositions {
 		// Simple smoke check - if line passes within smoke radius
 		smokeRadius := 144.0
 
-		distToLine := distancePointToLine(smokePos, start, end)
+		distToLine := distancePointToLine(smokePos.Position, start, end)
 		if distToLine < smokeRadius {
 			return true
 		}
 	}
 	return false
-}
+}*/
 
 func distancePointToLine(point, lineStart, lineEnd r3.Vector) float64 {
 	// Calculate distance from point to line segment
