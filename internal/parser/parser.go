@@ -91,6 +91,7 @@ type Parser struct {
 	lastFrameTime         time.Time
 	visibilityBufferTicks int
 	lastVisibleTarget     map[uint64]uint64 // Maps shooterID -> last seen victimID
+	fovDegrees            float64
 }
 
 func NewParser(debug bool) *Parser {
@@ -120,6 +121,7 @@ func NewParser(debug bool) *Parser {
 		visibilityBufferTicks: 64, // ~X * 64 tickrate = seconds
 		lastVisibleTarget:     make(map[uint64]uint64),
 		smokePositions:        make(map[int]GrenadeData),
+		fovDegrees:            90,
 	}
 }
 
@@ -681,12 +683,14 @@ func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 
 					// Calculate visibility
 					fov := p.calculateFOV(obs.Position, tgt.Position, obs.ViewAngleX)
-					visible := fov <= 50 && p.rayVisible(obs, tgt)
+					visible := fov <= p.fovDegrees && p.rayVisible(obs, tgt)
 
 					if visible {
 						if _, ok := p.enemySpottedTime[obs.SteamID]; !ok {
 							p.enemySpottedTime[obs.SteamID] = make(map[uint64]int)
+							p.enemySpottedTime[obs.SteamID][tgt.SteamID] = p.currentTick
 						}
+
 						if _, alreadySpotted := p.enemySpottedTime[obs.SteamID][tgt.SteamID]; !alreadySpotted {
 							p.enemySpottedTime[obs.SteamID][tgt.SteamID] = p.currentTick
 						}
@@ -697,7 +701,7 @@ func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 						if spottedTick, ok := p.enemySpottedTime[obs.SteamID][tgt.SteamID]; ok {
 
 							// Retain lastVisibleTarget if within the buffer
-							gracePeriod := 16 // ~250ms at 64 tick
+							gracePeriod := 64 // 32 = ~500ms at 64 tick  16 = ~250ms at 64 tick
 							if p.currentTick-spottedTick <= p.visibilityBufferTicks+gracePeriod {
 								p.lastVisibleTarget[obs.SteamID] = tgt.SteamID
 							} else {
@@ -918,6 +922,11 @@ func (p *Parser) loadBspData(debug bool) error {
 }
 
 func (p *Parser) rayVisible(obs PlayerFrameData, tgt PlayerFrameData) bool {
+	/*
+	 * Important: The order of checks in this function matter.
+	 * Re-ordering checks will cause issues!
+	 */
+
 	// Early distance check at 1500 units
 	direction := tgt.Position.Sub(obs.Position)
 	distance := direction.Norm()
@@ -925,20 +934,20 @@ func (p *Parser) rayVisible(obs PlayerFrameData, tgt PlayerFrameData) bool {
 		return false
 	}
 
+	// Map visibility check
+	if p.BspChecker != nil && !p.BspChecker.IsVisible(obs.Position, tgt.Position) {
+		return false
+	}
+
 	// FOV check only - remove the redundant angle checks
 	fov := p.calculateFOV(obs.Position, tgt.Position, obs.ViewAngleX)
-	if fov > 50 {
+	if fov > p.fovDegrees {
 		return false
 	}
 
 	/*if fov <= 50 && obs.PlayerName == "shmeeny" {
 		fmt.Printf("[DEBUG] FOV check: shmeeny -> target %d, FOV: %.2f\n", tgt.SteamID, fov)
 	}*/
-
-	// Map visibility check
-	if p.BspChecker != nil && !p.BspChecker.IsVisible(obs.Position, tgt.Position) {
-		return false
-	}
 
 	// Only validate smoke and flash if FOV check passes
 	if p.isLineInSmoke(obs.Position, tgt.Position) {
