@@ -103,6 +103,7 @@ func calculateTradeMetrics(stats *models.PlayerStats, metrics *models.LeetifyMet
 
 func calculateOverallAccuracy(stats *models.PlayerStats, metrics *models.LeetifyMetrics) {
 	if stats.ShotsTotal > 0 {
+		fmt.Printf("[SPOTTED HACKING] calculateOverallAccuracy for shmeeny -- Hits: %d Shots: %d\n", stats.HitsTotal, stats.ShotsTotal)
 		// Overall accuracy
 		metrics.AccuracyAll = float64(stats.HitsTotal) / float64(stats.ShotsTotal) * 100
 	}
@@ -158,7 +159,8 @@ func calculateSpottedAccuracy(stats *models.PlayerStats, metrics *models.Leetify
 		return
 	}
 
-	metrics.SpottedAccuracy = float64(stats.EnemySpottedHits) / float64(stats.EnemySpottedShots) * 100
+	fmt.Printf("[SPOTTED HACKING] calculateSpottedAccuracy for shmeeny -- HitsTotal: %d EnemySpottedShots: %d", stats.HitsTotal, stats.EnemySpottedShots)
+	metrics.SpottedAccuracy = float64(stats.HitsTotal) / float64(stats.EnemySpottedShots) * 100
 }
 
 func calculateAimSubScore(metrics *models.LeetifyMetrics) float64 {

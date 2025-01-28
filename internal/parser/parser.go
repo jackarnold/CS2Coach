@@ -24,6 +24,7 @@ type PlayerFrameData struct {
 	PlayerTeam   common.Team
 	Position     r3.Vector
 	ViewAngleX   float32
+	ViewAngleY   float32
 	IsAlive      bool
 	LastPosition r3.Vector
 	Velocity2D   float64
@@ -117,11 +118,11 @@ func NewParser(debug bool) *Parser {
 		sprayThreshold:        200 * time.Millisecond,
 		playerStatsCache:      make(map[uint64]*models.PlayerStats),
 		lastSprayTick:         make(map[uint64]int),
-		sprayTickWindow:       64, // ~1s at 64 tick
-		visibilityBufferTicks: 64, // ~X * 64 tickrate = seconds
+		sprayTickWindow:       64,  // ~1s at 64 tick
+		visibilityBufferTicks: 320, // 64 ticks = 1 second
 		lastVisibleTarget:     make(map[uint64]uint64),
 		smokePositions:        make(map[int]GrenadeData),
-		fovDegrees:            90,
+		fovDegrees:            90, // 90deg is apparently what we get?
 	}
 }
 
@@ -624,98 +625,85 @@ func (p *Parser) handleFrameDone(e events.FrameDone) {
 }
 
 func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
-	currentTick := gs.IngameTick()
-
-	// Ensure p.lastVisibleTarget is initialized
-	if p.lastVisibleTarget == nil {
-		p.lastVisibleTarget = make(map[uint64]uint64)
+	frameData := FrameData{
+		Tick:    p.parser.GameState().IngameTick(),
+		Players: []PlayerFrameData{},
 	}
 
-	for tick := p.lastProcessedTick + 1; tick <= currentTick; tick++ {
-		p.currentTick = tick
+	if p.enemySpottedTime == nil {
+		p.enemySpottedTime = make(map[uint64]map[uint64]int)
+	}
 
-		frameData := FrameData{
-			Tick:    p.currentTick,
-			Players: []PlayerFrameData{},
+	for _, player := range gs.Participants().Playing() {
+		if player.SteamID64 == 0 {
+			continue
 		}
 
-		if p.enemySpottedTime == nil {
-			p.enemySpottedTime = make(map[uint64]map[uint64]int)
+		currentPos := player.Position()
+		pFrame := PlayerFrameData{
+			SteamID:    player.SteamID64,
+			PlayerTeam: player.Team,
+			PlayerName: player.Name,
+			Position:   currentPos,
+			ViewAngleX: player.ViewDirectionX(),
+			ViewAngleY: player.ViewDirectionY(),
+			IsAlive:    player.IsAlive(),
 		}
+		frameData.Players = append(frameData.Players, pFrame)
 
-		for _, player := range gs.Participants().Playing() {
-			if player.SteamID64 == 0 {
+		// Initialize sub-maps
+		if _, ok := p.enemySpottedTime[player.SteamID64]; !ok {
+			p.enemySpottedTime[player.SteamID64] = make(map[uint64]int)
+		}
+	}
+
+	// ensure our map parser isn't nil
+	if p.BspChecker != nil {
+		// Loop over the attackers/shooters
+		for i := range frameData.Players {
+			obs := frameData.Players[i]
+			if !obs.IsAlive {
 				continue
 			}
 
-			currentPos := player.Position()
-			pFrame := PlayerFrameData{
-				SteamID:    player.SteamID64,
-				PlayerTeam: player.Team,
-				PlayerName: player.Name,
-				Position:   currentPos,
-				ViewAngleX: player.ViewDirectionX(),
-				IsAlive:    player.IsAlive(),
-			}
-			frameData.Players = append(frameData.Players, pFrame)
-
-			// Initialize sub-maps
-			if _, ok := p.enemySpottedTime[player.SteamID64]; !ok {
-				p.enemySpottedTime[player.SteamID64] = make(map[uint64]int)
-			}
-		}
-
-		// ensure our map parser isn't nil
-		if p.BspChecker != nil {
-			// Loop over the attackers/shooters
-			for i := range frameData.Players {
-				obs := frameData.Players[i]
-				if !obs.IsAlive {
+			// Loop over the targets/victims
+			for j := range frameData.Players {
+				tgt := frameData.Players[j]
+				if obs.SteamID == tgt.SteamID || !tgt.IsAlive || obs.PlayerTeam == tgt.PlayerTeam {
 					continue
 				}
 
-				// Loop over the targets/victims
-				for j := range frameData.Players {
-					tgt := frameData.Players[j]
-					if obs.SteamID == tgt.SteamID || !tgt.IsAlive || obs.PlayerTeam == tgt.PlayerTeam {
-						continue
+				// Calculate visibility
+				visible := p.rayVisible(obs, tgt)
+
+				if visible {
+					if _, ok := p.enemySpottedTime[obs.SteamID]; !ok {
+						p.enemySpottedTime[obs.SteamID] = make(map[uint64]int)
+						p.enemySpottedTime[obs.SteamID][tgt.SteamID] = p.parser.GameState().IngameTick()
 					}
 
-					// Calculate visibility
-					fov := p.calculateFOV(obs.Position, tgt.Position, obs.ViewAngleX)
-					visible := fov <= p.fovDegrees && p.rayVisible(obs, tgt)
+					if _, alreadySpotted := p.enemySpottedTime[obs.SteamID][tgt.SteamID]; !alreadySpotted {
+						p.enemySpottedTime[obs.SteamID][tgt.SteamID] = p.parser.GameState().IngameTick()
+					}
 
-					if visible {
-						if _, ok := p.enemySpottedTime[obs.SteamID]; !ok {
-							p.enemySpottedTime[obs.SteamID] = make(map[uint64]int)
-							p.enemySpottedTime[obs.SteamID][tgt.SteamID] = p.currentTick
-						}
+					p.lastVisibleTarget[obs.SteamID] = tgt.SteamID // Always update last visible target if visible
+				} else {
+					// If they were seen recently but momentarily went hidden, don't reset if they are within a window of tolerance
+					if spottedTick, ok := p.enemySpottedTime[obs.SteamID][tgt.SteamID]; ok {
 
-						if _, alreadySpotted := p.enemySpottedTime[obs.SteamID][tgt.SteamID]; !alreadySpotted {
-							p.enemySpottedTime[obs.SteamID][tgt.SteamID] = p.currentTick
-						}
-
-						p.lastVisibleTarget[obs.SteamID] = tgt.SteamID // Always update last visible target if visible
-					} else {
-						// If they were seen recently but momentarily went hidden, don't reset if they are within a window of tolerance
-						if spottedTick, ok := p.enemySpottedTime[obs.SteamID][tgt.SteamID]; ok {
-
-							// Retain lastVisibleTarget if within the buffer
-							gracePeriod := 64 // 32 = ~500ms at 64 tick  16 = ~250ms at 64 tick
-							if p.currentTick-spottedTick <= p.visibilityBufferTicks+gracePeriod {
-								p.lastVisibleTarget[obs.SteamID] = tgt.SteamID
-							} else {
-								delete(p.enemySpottedTime[obs.SteamID], tgt.SteamID)
-							}
+						// Retain lastVisibleTarget if within the buffer
+						//gracePeriod := 32 // 32 = ~500ms at 64 tick  16 = ~250ms at 64 tick
+						if p.parser.GameState().IngameTick()-spottedTick <= p.visibilityBufferTicks { //+gracePeriod {
+							p.lastVisibleTarget[obs.SteamID] = tgt.SteamID
+						} else {
+							delete(p.enemySpottedTime[obs.SteamID], tgt.SteamID)
 						}
 					}
 				}
 			}
 		}
-		p.frameStorage.frames = append(p.frameStorage.frames, frameData)
 	}
-
-	p.lastProcessedTick = currentTick
+	p.frameStorage.frames = append(p.frameStorage.frames, frameData)
 }
 
 /*
@@ -940,8 +928,9 @@ func (p *Parser) rayVisible(obs PlayerFrameData, tgt PlayerFrameData) bool {
 	}
 
 	// FOV check only - remove the redundant angle checks
-	fov := p.calculateFOV(obs.Position, tgt.Position, obs.ViewAngleX)
-	if fov > p.fovDegrees {
+	horizontalFOV := p.calculateFOV(obs.Position, tgt.Position, obs.ViewAngleX)
+	verticalFOV := p.calculateVerticalFOV(obs.Position, tgt.Position, obs.ViewAngleY)
+	if horizontalFOV > p.fovDegrees || verticalFOV > p.fovDegrees {
 		return false
 	}
 
@@ -1012,6 +1001,14 @@ func (p *Parser) rayVisible(obs PlayerFrameData, tgt PlayerFrameData) bool {
 
 	return true
 }*/
+
+func (p *Parser) calculateVerticalFOV(src, dst r3.Vector, viewAngleY float32) float64 {
+	deltaZ := dst.Z - src.Z
+	horizontalDist := math.Sqrt(math.Pow(dst.X-src.X, 2) + math.Pow(dst.Y-src.Y, 2))
+	angleRad := math.Atan2(float64(deltaZ), float64(horizontalDist))
+	angleDeg := angleRad * 180.0 / math.Pi
+	return math.Abs(float64(viewAngleY) - angleDeg)
+}
 
 func (p *Parser) calculateFOV(src, dst r3.Vector, viewAngle float32) float64 {
 	targetAngle := calcAngleBetween(src, dst)
@@ -1203,7 +1200,7 @@ func (p *Parser) getWeaponMaxSpeed(weaponType common.EquipmentType) float64 {
 }
 
 func (p *Parser) handleWeaponFire(e events.WeaponFire) {
-	if !p.isLiveGameRound() || e.Shooter == nil || e.Shooter.SteamID64 == 0 {
+	if !p.isLiveGameRound() || e.Shooter == nil || e.Shooter.SteamID64 == 0 || e.Weapon.Class() == common.EqClassGrenade || e.Weapon.Type == common.EqBomb {
 		return
 	}
 
@@ -1215,6 +1212,7 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 		return
 	}
 
+	// This will count all shots regardless of if they were at a teammate... is that correct?
 	stats.ShotsTotal++
 
 	var currentVelocity float64
@@ -1229,36 +1227,36 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 	shooterID := e.Shooter.SteamID64
 	currentTime := time.Now()
 	enemySpotted := false
-	var spottedVictimID uint64
 
 	if victimID, exists := p.lastVisibleTarget[shooterID]; exists {
+		if e.Shooter.Name == "shmeeny" && p.debug {
+			log.Printf("[SPOTTED HACKING] lastVisibleTarget[%d]: %d", e.Shooter.SteamID64, p.lastVisibleTarget[e.Shooter.SteamID64])
+		}
 		if spottedTick, wasSpotted := p.enemySpottedTime[shooterID][victimID]; wasSpotted {
-			ticksSinceSpotted := p.currentTick - spottedTick
+			if e.Shooter.Name == "shmeeny" && p.debug {
+				log.Printf("[SPOTTED HACKING] enemySpottedTime[%d][%d]: %d", e.Shooter.SteamID64, victimID, p.enemySpottedTime[e.Shooter.SteamID64][victimID])
+			}
+			ticksSinceSpotted := p.parser.GameState().IngameTick() - spottedTick
 			if ticksSinceSpotted >= 0 && ticksSinceSpotted <= p.visibilityBufferTicks {
 				stats.EnemySpottedShots++
 				enemySpotted = true
+
+				if e.Shooter.Name == "shmeeny" {
+					fmt.Printf("[SPOTTED HACKING] shmeeny's EnemySpottedShots incremented to %d shots at %d ticksSinceSpotted: %d spottedTick: %d currentTick: %d\n",
+						stats.EnemySpottedShots, victimID, ticksSinceSpotted, spottedTick, p.parser.GameState().IngameTick())
+				}
+
 				if p.debug {
 					fmt.Printf("[DEBUG] EnemySpottedShots incremented: %s shot at %d (ticksSinceSpotted: %d)\n",
 						e.Shooter.Name, victimID, ticksSinceSpotted)
 				}
-			} else if p.debug {
-				fmt.Printf("[DEBUG] Skipped EnemySpottedShots: %s shot at %d (ticksSinceSpotted: %d > visibilityBufferTicks: %d)\n",
+			} else if e.Shooter.Name == "shmeeny" {
+				fmt.Printf("[SPOTTED HACKING] Skipped EnemySpottedShots: %s shot at %d (ticksSinceSpotted: %d > visibilityBufferTicks: %d)\n",
 					e.Shooter.Name, victimID, ticksSinceSpotted, p.visibilityBufferTicks)
 			}
 		}
-	} else if p.debug {
-		fmt.Printf("[DEBUG] No last visible target for shooter %s\n", e.Shooter.Name)
-	}
-
-	if enemySpotted {
-		if e.Shooter.Name == "shmeeny" {
-			fmt.Printf("[DEBUG] Incrementing EnemySpottedShots for shmeeny to %d\n", stats.EnemySpottedShots)
-		}
-
-		if p.debug {
-			fmt.Printf("[DEBUG] handleWeaponFire: Shooter %s spotted victim %d and EnemySpottedShots incremented to %d\n",
-				e.Shooter.Name, spottedVictimID, stats.EnemySpottedShots)
-		}
+	} else if e.Shooter.Name == "shmeeny" {
+		fmt.Printf("[SPOTTED HACKING] No last visible target for shooter %s\n", e.Shooter.Name)
 	}
 
 	// Track spray timing
@@ -1355,7 +1353,10 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 		return
 	}
 
-	stats.HitsTotal++
+	// Hits should not count if it was a grenade or a bomb
+	if e.Weapon.Class() != common.EqClassGrenade || e.Weapon.Type != common.EqBomb {
+		stats.HitsTotal++
+	}
 
 	victimStats := p.GetOrCreatePlayerStats(e.Player.SteamID64, e.Player.Name)
 	if victimStats == nil {
@@ -1408,45 +1409,53 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 	p.lastKnownHP[victimID] = max(oldHP-actualDamage, 0)
 
 	// Ensure our map parser is not nil
+	// TODO: A hit is a hit is a hit, so we need to not consider if they were spotted here, that's dumb
 	if p.BspChecker != nil {
 		// Check if victm was previously spotted by the attacker
-		if spottedTick, wasSpotted := p.enemySpottedTime[e.Attacker.SteamID64][victimID]; wasSpotted {
-			// Validate that the spotted time is within a valid timeframe
-			ticksSinceSpotted := p.currentTick - spottedTick
-			if ticksSinceSpotted >= 0 && ticksSinceSpotted <= p.visibilityBufferTicks {
-				stats.EnemySpottedHits++
-
+		if lastSeenID, exists := p.lastVisibleTarget[e.Attacker.SteamID64]; exists && lastSeenID == victimID {
+			if spottedTick, wasSpotted := p.enemySpottedTime[e.Attacker.SteamID64][victimID]; wasSpotted {
+				// Validate that the spotted time is within a valid timeframe
+				ticksSinceSpotted := p.parser.GameState().IngameTick() - spottedTick
 				if e.Attacker.Name == "shmeeny" {
-					fmt.Printf("[DEBUG] EnemySpottedHits incremented: %s hit %s (ticksSinceSpotted: %d)\n",
+					fmt.Printf("[SPOTTED HACKING] shmeeny spotted and hit %d ticksSinceSpotted: %d spottedTick: %d currentTick: %d\n",
+						victimID, ticksSinceSpotted, spottedTick, p.parser.GameState().IngameTick())
+				}
+
+				if ticksSinceSpotted >= 0 { //&& ticksSinceSpotted <= p.visibilityBufferTicks {
+					stats.EnemySpottedHits++
+
+					if e.Attacker.Name == "shmeeny" {
+						fmt.Printf("[SPOTTED HACKING] shmeeny's EnemySpottedHits incremented to %d shots at %d ticksSinceSpotted: %d spottedTick: %d currentTick: %d\n",
+							stats.EnemySpottedHits, victimID, ticksSinceSpotted, spottedTick, p.parser.GameState().IngameTick())
+					}
+
+					// Check if this is the first damage and track Time To Damage
+					if _, alreadyCounted := p.firstDamageTime[e.Attacker.SteamID64][victimID]; !alreadyCounted {
+						timeToFirstDamage := float64(ticksSinceSpotted) / 64.0 * 1000 // Convert ticks to milliseconds
+
+						if timeToFirstDamage <= 1000 { // Exclude values > 1 second (trigger discipline)
+							stats.TimeToFirstDamage = append(stats.TimeToFirstDamage, timeToFirstDamage)
+						}
+
+						// Update firstDamageTime
+						if _, exists := p.firstDamageTime[e.Attacker.SteamID64]; !exists {
+							p.firstDamageTime[e.Attacker.SteamID64] = make(map[uint64]int)
+						}
+						p.firstDamageTime[e.Attacker.SteamID64][victimID] = p.parser.GameState().IngameTick()
+
+						if p.debug && e.Attacker.Name == "shmeeny" {
+							fmt.Printf("[DEBUG] Attacker %s saw victim %s for %d ticks (%.2fms) before hitting.\n",
+								e.Attacker.Name, e.Player.Name, ticksSinceSpotted, timeToFirstDamage)
+						}
+					}
+				} else if e.Attacker.Name == "shmeeny" {
+					fmt.Printf("[DEBUG] Skipped EnemySpottedHits: %s hit %s (ticksSinceSpotted: %d > buffer)\n",
 						e.Attacker.Name, e.Player.Name, ticksSinceSpotted)
 				}
-
-				// Check if this is the first damage and track Time To Damage
-				if _, alreadyCounted := p.firstDamageTime[e.Attacker.SteamID64][victimID]; !alreadyCounted {
-					timeToFirstDamage := float64(ticksSinceSpotted) / 64.0 * 1000 // Convert ticks to milliseconds
-
-					if timeToFirstDamage <= 1000 { // Exclude values > 1 second (trigger discipline)
-						stats.TimeToFirstDamage = append(stats.TimeToFirstDamage, timeToFirstDamage)
-					}
-
-					// Update firstDamageTime
-					if _, exists := p.firstDamageTime[e.Attacker.SteamID64]; !exists {
-						p.firstDamageTime[e.Attacker.SteamID64] = make(map[uint64]int)
-					}
-					p.firstDamageTime[e.Attacker.SteamID64][victimID] = p.currentTick
-
-					if p.debug && e.Attacker.Name == "shmeeny" {
-						fmt.Printf("[DEBUG] Attacker %s saw victim %s for %d ticks (%.2fms) before hitting.\n",
-							e.Attacker.Name, e.Player.Name, ticksSinceSpotted, timeToFirstDamage)
-					}
-				}
-			} else if e.Attacker.Name == "shmeeny" {
-				fmt.Printf("[DEBUG] Skipped EnemySpottedHits: %s hit %s (ticksSinceSpotted: %d > buffer)\n",
-					e.Attacker.Name, e.Player.Name, ticksSinceSpotted)
+			} else if p.debug && !p.warnedBspChecker {
+				fmt.Println("[DEBUG] Warning: bspChecker is nil, skipping visibility checks for damage events.")
+				p.warnedBspChecker = true
 			}
-		} else if p.debug && !p.warnedBspChecker {
-			fmt.Println("[DEBUG] Warning: bspChecker is nil, skipping visibility checks for damage events.")
-			p.warnedBspChecker = true
 		}
 	}
 }
