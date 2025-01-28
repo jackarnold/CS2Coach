@@ -16,7 +16,6 @@ type PlayerStats struct {
 
 	// Aim metrics
 	EnemySpottedShots   int
-	EnemySpottedHits    int
 	SprayShots          int
 	SprayHits           int
 	CounterStrafedShots int
