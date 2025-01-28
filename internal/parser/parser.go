@@ -411,17 +411,23 @@ func (p *Parser) handleFlashEvent(e events.PlayerFlashed) {
 	// New flash event
 	if _, exists := p.flashedPlayers[e.Player.SteamID64]; !exists {
 		p.flashedPlayers[e.Player.SteamID64] = flashEndTick
-		fmt.Printf("[VISION HACKING] FlashEvent added for %s -- currentTick: %d flashEndTick: %d flashDurationSeconds: %d eventDuration: %d\n",
-			e.Player.Name, currentTick, flashEndTick, flashDuration, eventDuration)
+		if p.debug {
+			fmt.Printf("[VISION HACKING] FlashEvent added for %s -- currentTick: %d flashEndTick: %d flashDurationSeconds: %d eventDuration: %d\n",
+				e.Player.Name, currentTick, flashEndTick, flashDuration, eventDuration)
+		}
 	} else if storedFlashEndTick, exists := p.flashedPlayers[e.Player.SteamID64]; exists {
 		// New flash event will go longer than the last
 		if storedFlashEndTick < flashEndTick {
 			p.flashedPlayers[e.Player.SteamID64] = flashEndTick
-			fmt.Printf("[VISION HACKING] FlashEvent extended for %s -- currentTick: %d storedFlashEndTick: %d flashEndTick: %d flashDurationSeconds: %d eventDuration: %d\n",
-				e.Player.Name, currentTick, storedFlashEndTick, flashEndTick, flashDuration, eventDuration)
+			if p.debug {
+				fmt.Printf("[VISION HACKING] FlashEvent extended for %s -- currentTick: %d storedFlashEndTick: %d flashEndTick: %d flashDurationSeconds: %d eventDuration: %d\n",
+					e.Player.Name, currentTick, storedFlashEndTick, flashEndTick, flashDuration, eventDuration)
+			}
 		} else {
-			fmt.Printf("[VISION HACKING] FlashEvent is older than existing flash event for %s -- currentTick: %d storedFlashEndTick: %d flashEndTick: %d\n",
-				e.Player.Name, currentTick, storedFlashEndTick, flashEndTick)
+			if p.debug {
+				fmt.Printf("[VISION HACKING] FlashEvent is older than existing flash event for %s -- currentTick: %d storedFlashEndTick: %d flashEndTick: %d\n",
+					e.Player.Name, currentTick, storedFlashEndTick, flashEndTick)
+			}
 		}
 	}
 }
@@ -940,14 +946,14 @@ func (p *Parser) rayVisible(obs PlayerFrameData, tgt PlayerFrameData) bool {
 
 	// Only validate smoke and flash if FOV check passes
 	if p.isLineInSmoke(obs.Position, tgt.Position) {
-		if obs.PlayerName == "shmeeny" {
+		if p.debug && obs.PlayerName == "shmeeny" {
 			fmt.Printf("[VISION HACKING] Smoke blocked vision for shmeeny at tick %d\n", p.parser.GameState().IngameTick())
 		}
 		return false
 	}
 
 	if p.isPlayerFlashed(obs.SteamID) {
-		if obs.PlayerName == "shmeeny" {
+		if p.debug && obs.PlayerName == "shmeeny" {
 			fmt.Printf("[VISION HACKING] Flash blocked vision for shmeeny at tick %d\n", p.parser.GameState().IngameTick())
 		}
 		return false
@@ -955,52 +961,6 @@ func (p *Parser) rayVisible(obs PlayerFrameData, tgt PlayerFrameData) bool {
 
 	return true
 }
-
-/*func (p *Parser) rayVisible(obs PlayerFrameData, tgt PlayerFrameData) bool {
-	// Ensure BSP is initialized before performing visibility checks
-	if p.BspChecker == nil {
-		if p.debug && !p.warnedBspChecker {
-			fmt.Println("[DEBUG] Warning: BSP file not loaded, skipping visibility checks in rayVisible.")
-			p.warnedBspChecker = true
-		}
-		return false
-	}
-
-	// Check visibility using BSP checker
-	visible := p.BspChecker.IsVisible(obs.Position, tgt.Position)
-	if !visible {
-		return false
-	}
-
-	// Additional checks for smoke and flash
-	if p.isLineInSmoke(obs.Position, tgt.Position) || p.isPlayerFlashed(obs.SteamID) {
-		return false
-	}
-
-	// Basic distance check - reduced from 2000 to be more realistic
-	dist := tgt.Position.Sub(obs.Position).Norm()
-	if dist > 1500 {
-		return false
-	}
-
-	// Visibility FOV check (90 degrees total, 45 each side)
-	angleToTarget := calcAngleBetween(obs.Position, tgt.Position)
-	angleDiff := float32(math.Abs(float64(angleToTarget - obs.ViewAngleX)))
-
-	// Handle wrap-around angles (e.g., 359 vs 0)
-	if angleDiff > 180 {
-		angleDiff = 360 - angleDiff
-	}
-
-	// If angle difference is > 45 degrees from center view angle, target is outside player's visible cone
-	// (90 degree total FOV = 45 degrees each side from center)
-	// Trying 50 for now just to see
-	if angleDiff > 50 {
-		return false
-	}
-
-	return true
-}*/
 
 func (p *Parser) calculateVerticalFOV(src, dst r3.Vector, viewAngleY float32) float64 {
 	deltaZ := dst.Z - src.Z
@@ -1060,9 +1020,13 @@ func (p *Parser) handleSmokeDetonate(e events.SmokeStart) {
 	if _, exists := p.smokePositions[e.GrenadeEvent.GrenadeEntityID]; !exists {
 		detonatedSmoke := *p.createSmokeGrenadeData(e.GrenadeEvent)
 		p.smokePositions[e.GrenadeEvent.GrenadeEntityID] = detonatedSmoke
-		fmt.Printf("[VISION HACKING] Adding detonated smoke -- Tick: %d EntityID: %d\n", detonatedSmoke.DetonateTick, detonatedSmoke.EntityId)
+		if p.debug {
+			fmt.Printf("[VISION HACKING] Adding detonated smoke -- Tick: %d EntityID: %d\n", detonatedSmoke.DetonateTick, detonatedSmoke.EntityId)
+		}
 	} else {
-		fmt.Printf("[VISION HACKING] Skipping duplicate SmokeStart Event -- EntityID: %d\n", e.GrenadeEvent.GrenadeEntityID)
+		if p.debug {
+			fmt.Printf("[VISION HACKING] Skipping duplicate SmokeStart Event -- EntityID: %d\n", e.GrenadeEvent.GrenadeEntityID)
+		}
 	}
 }
 
@@ -1073,9 +1037,13 @@ func (p *Parser) handleSmokeExpire(e events.SmokeExpired) {
 
 	if detonatedSmoke, exists := p.smokePositions[e.GrenadeEvent.GrenadeEntityID]; exists {
 		delete(p.smokePositions, detonatedSmoke.EntityId)
-		fmt.Printf("[VISION HACKING] Expired smoke -- DetonatedTick: %d CurrentTick: %d EntityID: %d\n", detonatedSmoke.DetonateTick, p.parser.GameState().IngameTick(), detonatedSmoke.EntityId)
+		if p.debug {
+			fmt.Printf("[VISION HACKING] Expired smoke -- DetonatedTick: %d CurrentTick: %d EntityID: %d\n", detonatedSmoke.DetonateTick, p.parser.GameState().IngameTick(), detonatedSmoke.EntityId)
+		}
 	} else {
-		fmt.Printf("[VISION HACKING] No smoke exists to expire -- EntityID: %d\n", e.GrenadeEvent.GrenadeEntityID)
+		if p.debug {
+			fmt.Printf("[VISION HACKING] No smoke exists to expire -- EntityID: %d\n", e.GrenadeEvent.GrenadeEntityID)
+		}
 	}
 }
 
@@ -1241,7 +1209,7 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 				stats.EnemySpottedShots++
 				enemySpotted = true
 
-				if e.Shooter.Name == "shmeeny" {
+				if e.Shooter.Name == "shmeeny" && p.debug {
 					fmt.Printf("[SPOTTED HACKING] shmeeny's EnemySpottedShots incremented to %d shots at %d ticksSinceSpotted: %d spottedTick: %d currentTick: %d\n",
 						stats.EnemySpottedShots, victimID, ticksSinceSpotted, spottedTick, p.parser.GameState().IngameTick())
 				}
@@ -1250,12 +1218,12 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 					fmt.Printf("[DEBUG] EnemySpottedShots incremented: %s shot at %d (ticksSinceSpotted: %d)\n",
 						e.Shooter.Name, victimID, ticksSinceSpotted)
 				}
-			} else if e.Shooter.Name == "shmeeny" {
+			} else if e.Shooter.Name == "shmeeny" && p.debug {
 				fmt.Printf("[SPOTTED HACKING] Skipped EnemySpottedShots: %s shot at %d (ticksSinceSpotted: %d > visibilityBufferTicks: %d)\n",
 					e.Shooter.Name, victimID, ticksSinceSpotted, p.visibilityBufferTicks)
 			}
 		}
-	} else if e.Shooter.Name == "shmeeny" {
+	} else if e.Shooter.Name == "shmeeny" && p.debug {
 		fmt.Printf("[SPOTTED HACKING] No last visible target for shooter %s\n", e.Shooter.Name)
 	}
 
@@ -1416,7 +1384,7 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 			if spottedTick, wasSpotted := p.enemySpottedTime[e.Attacker.SteamID64][victimID]; wasSpotted {
 				// Validate that the spotted time is within a valid timeframe
 				ticksSinceSpotted := p.parser.GameState().IngameTick() - spottedTick
-				if e.Attacker.Name == "shmeeny" {
+				if e.Attacker.Name == "shmeeny" && p.debug {
 					fmt.Printf("[SPOTTED HACKING] shmeeny spotted and hit %d ticksSinceSpotted: %d spottedTick: %d currentTick: %d\n",
 						victimID, ticksSinceSpotted, spottedTick, p.parser.GameState().IngameTick())
 				}
@@ -1424,7 +1392,7 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 				if ticksSinceSpotted >= 0 { //&& ticksSinceSpotted <= p.visibilityBufferTicks {
 					stats.EnemySpottedHits++
 
-					if e.Attacker.Name == "shmeeny" {
+					if e.Attacker.Name == "shmeeny" && p.debug {
 						fmt.Printf("[SPOTTED HACKING] shmeeny's EnemySpottedHits incremented to %d shots at %d ticksSinceSpotted: %d spottedTick: %d currentTick: %d\n",
 							stats.EnemySpottedHits, victimID, ticksSinceSpotted, spottedTick, p.parser.GameState().IngameTick())
 					}
@@ -1448,7 +1416,7 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 								e.Attacker.Name, e.Player.Name, ticksSinceSpotted, timeToFirstDamage)
 						}
 					}
-				} else if e.Attacker.Name == "shmeeny" {
+				} else if e.Attacker.Name == "shmeeny" && p.debug {
 					fmt.Printf("[DEBUG] Skipped EnemySpottedHits: %s hit %s (ticksSinceSpotted: %d > buffer)\n",
 						e.Attacker.Name, e.Player.Name, ticksSinceSpotted)
 				}
@@ -1672,7 +1640,7 @@ func (p *Parser) isPlayerFlashed(playerID uint64) bool {
 	if flashEndTick, exists := p.flashedPlayers[playerID]; exists {
 		// If now is *before* flashEndTick, the player is still flashed
 		isFlashed := p.parser.GameState().IngameTick() < flashEndTick
-		if isFlashed {
+		if isFlashed && p.debug {
 			fmt.Printf("[VISION HACKING] PlayerID: %d is flashed. Current Tick: %d flashEndTick: %d\n", playerID, p.parser.GameState().IngameTick(), flashEndTick)
 		}
 		return isFlashed
@@ -1704,7 +1672,9 @@ func (p *Parser) isLineInSmoke(start, end r3.Vector) bool {
 			}
 
 			if point.Sub(smoke.Position).Norm() < smokeRadius {
-				fmt.Printf("[VISION HACKING] Smoke blocked vision at tick %d (smoke age: %d ticks, EntityId: %d)\n", p.currentTick, ticksSinceDetonate, smoke.EntityId)
+				if p.debug {
+					fmt.Printf("[VISION HACKING] Smoke blocked vision at tick %d (smoke age: %d ticks, EntityId: %d)\n", p.currentTick, ticksSinceDetonate, smoke.EntityId)
+				}
 				return true
 			}
 		}
