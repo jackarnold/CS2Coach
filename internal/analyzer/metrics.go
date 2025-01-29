@@ -140,15 +140,21 @@ func calculateCounterStrafing(stats *models.PlayerStats, metrics *models.Leetify
 }
 
 func calculateTimeToDamage(stats *models.PlayerStats, metrics *models.LeetifyMetrics) {
+	fmt.Printf("Total number of TTD entries: %d\n", len(stats.TimeToFirstDamage))
 	if stats.MedianTTD > 0 {
 		// Use the median Time to Damage if available
 		metrics.TimeToFirstDamage = stats.MedianTTD
+		fmt.Printf("Using MedianTTD: %f\n", stats.MedianTTD)
 	} else if len(stats.TimeToFirstDamage) > 0 {
+		fmt.Println("Falling back to Average")
 		// Fallback to average Time to Damage
 		sum := 0.0
-		for _, time := range stats.TimeToFirstDamage {
+		for idx, time := range stats.TimeToFirstDamage {
+			fmt.Printf("stats.TimeToFirstDamage[%d]: %f", idx, time)
 			sum += time
 		}
+
+		fmt.Printf("metrics.TimeToFirstDamage = %f / %d", sum, len(stats.TimeToFirstDamage))
 		metrics.TimeToFirstDamage = sum / float64(len(stats.TimeToFirstDamage))
 	}
 }
@@ -159,7 +165,6 @@ func calculateSpottedAccuracy(stats *models.PlayerStats, metrics *models.Leetify
 		return
 	}
 
-	fmt.Printf("[SPOTTED HACKING] calculateSpottedAccuracy for shmeeny -- HitsTotal: %d EnemySpottedShots: %d", stats.HitsTotal, stats.EnemySpottedShots)
 	metrics.SpottedAccuracy = float64(stats.HitsTotal) / float64(stats.EnemySpottedShots) * 100
 }
 

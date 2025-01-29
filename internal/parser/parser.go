@@ -61,68 +61,68 @@ type Parser struct {
 	parser            dem.Parser
 	lastKillTime      *time.Time
 	lastKillVictim    uint64
-	lastKillKiller    *models.PlayerStats
 	roundStartTime    time.Time
 	sprayStartTime    map[uint64]time.Time
 	currentSprayShots map[uint64]int
 	// Map of attacker -> (victim -> time that victim was first spotted this round)
-	enemySpottedTick      map[uint64]map[uint64]int
-	firstDamageTick       map[uint64]map[uint64]int
-	alivePlayersByTeam    map[int]int
-	currentRoundKills     map[uint64]map[int]int
-	lastWeaponFireTime    map[uint64]time.Time
-	angleHistory          map[uint64][]float32
-	lastKnownHP           map[uint64]int // steamID -> current HP
-	lastDamageBy          map[uint64]map[uint64]int
-	lastUpdateTime        time.Time
-	smokePositions        map[int]GrenadeData // Track active smoke positions
-	flashedPlayers        map[uint64]int      // Track the tick when a player is no longer flashed
-	frameStorage          FrameStorage
-	BspChecker            *BSPVisibilityChecker
-	warnedBspChecker      bool // Tracks if the warning has been logged
-	lastProcessedTick     int
-	currentTick           int
-	visibilityStats       map[uint64]int
-	spottedStats          map[uint64]int
-	mapNameFound          bool
-	sprayThreshold        time.Duration
-	playerStatsCache      map[uint64]*models.PlayerStats // Centralized cache for player stats
-	lastSprayTick         map[uint64]int                 // Last spray shot tick per player
-	sprayTickWindow       int                            // Ticks window for spray (12 ticks = ~200ms)
-	lastFrameTime         time.Time
-	visibilityBufferTicks int
-	lastVisibleTarget     map[uint64]uint64 // Maps shooterID -> last seen victimID
-	fovDegrees            float64
+	enemySpottedTick       map[uint64]map[uint64]int
+	firstDamageTick        map[uint64]map[uint64]int
+	alivePlayersByTeam     map[int]int
+	currentRoundKills      map[uint64]map[int]int
+	lastWeaponFireTime     map[uint64]time.Time
+	angleHistory           map[uint64][]float32
+	lastKnownHP            map[uint64]int // steamID -> current HP
+	lastDamageBy           map[uint64]map[uint64]int
+	smokePositions         map[int]GrenadeData // Track active smoke positions
+	flashedPlayers         map[uint64]int      // Track the tick when a player is no longer flashed
+	frameStorage           FrameStorage
+	BspChecker             *BSPVisibilityChecker
+	lastProcessedTick      int
+	currentTick            int
+	visibilityStats        map[uint64]int
+	spottedStats           map[uint64]int
+	mapNameFound           bool
+	sprayThreshold         time.Duration
+	playerStatsCache       map[uint64]*models.PlayerStats // Centralized cache for player stats
+	lastSprayTick          map[uint64]int                 // Last spray shot tick per player
+	sprayTickWindow        int                            // Ticks window for spray (12 ticks = ~200ms)
+	visibilityBufferTicks  int
+	lastVisibleTarget      map[uint64]uint64
+	lastTickVisible        map[uint64]map[uint64]int
+	fovDegrees             float64
+	engagementTimeoutTicks int
 }
 
 func NewParser(debug bool) *Parser {
 	return &Parser{
-		debug:                 debug,
-		match:                 models.NewMatch(),
-		lastDamageBy:          make(map[uint64]map[uint64]int),
-		alivePlayersByTeam:    make(map[int]int),
-		currentRoundKills:     make(map[uint64]map[int]int),
-		sprayStartTime:        make(map[uint64]time.Time),
-		currentSprayShots:     make(map[uint64]int),
-		enemySpottedTick:      make(map[uint64]map[uint64]int),
-		firstDamageTick:       make(map[uint64]map[uint64]int),
-		lastWeaponFireTime:    make(map[uint64]time.Time),
-		angleHistory:          make(map[uint64][]float32),
-		lastKnownHP:           make(map[uint64]int),
-		visibilityStats:       make(map[uint64]int),
-		spottedStats:          make(map[uint64]int),
-		flashedPlayers:        make(map[uint64]int),
-		lastProcessedTick:     -1,
-		frameStorage:          FrameStorage{frames: make([]FrameData, 0)},
-		mapNameFound:          false,
-		sprayThreshold:        200 * time.Millisecond,
-		playerStatsCache:      make(map[uint64]*models.PlayerStats),
-		lastSprayTick:         make(map[uint64]int),
-		sprayTickWindow:       64,  // ~1s at 64 tick
-		visibilityBufferTicks: 320, // 64 ticks = 1 second
-		lastVisibleTarget:     make(map[uint64]uint64),
-		smokePositions:        make(map[int]GrenadeData),
-		fovDegrees:            90, // 90deg is apparently what we get?
+		debug:                  debug,
+		match:                  models.NewMatch(),
+		lastDamageBy:           make(map[uint64]map[uint64]int),
+		alivePlayersByTeam:     make(map[int]int),
+		currentRoundKills:      make(map[uint64]map[int]int),
+		sprayStartTime:         make(map[uint64]time.Time),
+		currentSprayShots:      make(map[uint64]int),
+		enemySpottedTick:       make(map[uint64]map[uint64]int),
+		firstDamageTick:        make(map[uint64]map[uint64]int),
+		lastWeaponFireTime:     make(map[uint64]time.Time),
+		angleHistory:           make(map[uint64][]float32),
+		lastKnownHP:            make(map[uint64]int),
+		visibilityStats:        make(map[uint64]int),
+		spottedStats:           make(map[uint64]int),
+		flashedPlayers:         make(map[uint64]int),
+		lastProcessedTick:      -1,
+		frameStorage:           FrameStorage{frames: make([]FrameData, 0)},
+		mapNameFound:           false,
+		sprayThreshold:         200 * time.Millisecond,
+		playerStatsCache:       make(map[uint64]*models.PlayerStats),
+		lastSprayTick:          make(map[uint64]int),
+		sprayTickWindow:        64, // ~1s at 64 tick
+		visibilityBufferTicks:  32, // 32 ticks = ~500ms at 64 tick OLD:320, // 64 ticks = 1 second
+		lastVisibleTarget:      make(map[uint64]uint64),
+		lastTickVisible:        make(map[uint64]map[uint64]int), // Track the last tick a target was visible to a player
+		smokePositions:         make(map[int]GrenadeData),
+		fovDegrees:             90,  // 90deg is apparently what we get?
+		engagementTimeoutTicks: 256, // ~1s at 64 tick
 	}
 }
 
@@ -350,6 +350,8 @@ func (p *Parser) handleRoundStart(e events.RoundStart) {
 	p.firstDamageTick = make(map[uint64]map[uint64]int)
 	p.flashedPlayers = make(map[uint64]int)
 	p.smokePositions = make(map[int]GrenadeData)
+	p.lastTickVisible = make(map[uint64]map[uint64]int)
+	p.lastVisibleTarget = make(map[uint64]uint64)
 
 	// Update player stats for the new round
 	for _, player := range p.parser.GameState().Participants().Playing() {
@@ -569,75 +571,94 @@ func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 		p.enemySpottedTick = make(map[uint64]map[uint64]int)
 	}
 
+	currentTick := p.parser.GameState().IngameTick()
+
+	// Gather player data
 	for _, player := range gs.Participants().Playing() {
 		if player.SteamID64 == 0 {
 			continue
 		}
 
-		currentPos := player.Position()
 		pFrame := PlayerFrameData{
 			SteamID:    player.SteamID64,
 			PlayerTeam: player.Team,
 			PlayerName: player.Name,
-			Position:   currentPos,
+			Position:   player.Position(),
 			ViewAngleX: player.ViewDirectionX(),
 			ViewAngleY: player.ViewDirectionY(),
 			IsAlive:    player.IsAlive(),
 		}
 		frameData.Players = append(frameData.Players, pFrame)
-
-		// Initialize sub-maps
-		if _, ok := p.enemySpottedTick[player.SteamID64]; !ok {
-			p.enemySpottedTick[player.SteamID64] = make(map[uint64]int)
-		}
 	}
 
-	// ensure our map parser isn't nil
 	if p.BspChecker != nil {
-		// Loop over the attackers/shooters
 		for i := range frameData.Players {
 			obs := frameData.Players[i]
 			if !obs.IsAlive {
 				continue
 			}
 
-			// Loop over the targets/victims
+			if _, ok := p.enemySpottedTick[obs.SteamID]; !ok {
+				p.enemySpottedTick[obs.SteamID] = make(map[uint64]int)
+			}
+
+			if _, ok := p.lastTickVisible[obs.SteamID]; !ok {
+				p.lastTickVisible[obs.SteamID] = make(map[uint64]int)
+			}
+
 			for j := range frameData.Players {
 				tgt := frameData.Players[j]
 				if obs.SteamID == tgt.SteamID || !tgt.IsAlive || obs.PlayerTeam == tgt.PlayerTeam {
 					continue
 				}
 
-				// Calculate visibility
-				visible := p.rayVisible(obs, tgt)
+				if p.rayVisible(obs, tgt) {
+					// If we've never set earliestSpot, do it now
+					if _, seen := p.enemySpottedTick[obs.SteamID][tgt.SteamID]; !seen {
+						p.enemySpottedTick[obs.SteamID][tgt.SteamID] = currentTick
 
-				if visible {
-					if _, ok := p.enemySpottedTick[obs.SteamID]; !ok {
-						p.enemySpottedTick[obs.SteamID] = make(map[uint64]int)
-						p.enemySpottedTick[obs.SteamID][tgt.SteamID] = p.parser.GameState().IngameTick()
-					}
-
-					if _, alreadySpotted := p.enemySpottedTick[obs.SteamID][tgt.SteamID]; !alreadySpotted {
-						p.enemySpottedTick[obs.SteamID][tgt.SteamID] = p.parser.GameState().IngameTick()
-					}
-
-					p.lastVisibleTarget[obs.SteamID] = tgt.SteamID // Always update last visible target if visible
-				} else {
-					// If they were seen recently but momentarily went hidden, don't reset if they are within a window of tolerance
-					if spottedTick, ok := p.enemySpottedTick[obs.SteamID][tgt.SteamID]; ok {
-
-						// Retain lastVisibleTarget if within the buffer
-						//gracePeriod := 32 // 32 = ~500ms at 64 tick  16 = ~250ms at 64 tick
-						if p.parser.GameState().IngameTick()-spottedTick <= p.visibilityBufferTicks { //+gracePeriod {
-							p.lastVisibleTarget[obs.SteamID] = tgt.SteamID
-						} else {
-							delete(p.enemySpottedTick[obs.SteamID], tgt.SteamID)
+						if obs.PlayerName == "shmeeny" {
+							fmt.Printf("[TTD HACKING] FirstSpot - tick:%d setting spottedTick for %s sees %s\n",
+								currentTick, obs.PlayerName, tgt.PlayerName)
 						}
 					}
+
+					// Update lastTickVisible, reset noVisConsecutiveTicks
+					p.lastTickVisible[obs.SteamID][tgt.SteamID] = currentTick
+
+					// Update lastVisibleTarget (for handleWeaponFire / handlePlayerHurt usage)
+					p.lastVisibleTarget[obs.SteamID] = tgt.SteamID
+
+				} else {
+					// Not visible this frame
+					// If the last time we actually saw them was >= engagementTimeoutTicks ago, reset earliestSpot
+					/*if lastVisTick, ok := p.lastTickVisible[obs.SteamID][tgt.SteamID]; ok {
+						ticksElapsed := (currentTick - lastVisTick)
+						// We have had *no* new vision for 256 consecutive ticks => remove earliestSpot
+						if ticksElapsed >= p.engagementTimeoutTicks {
+
+							if obs.PlayerName == "shmeeny" {
+								fmt.Printf(
+									"[TTD HACKING] RemoveEarliestSpot obs=%s victim=%s at currentTick=%d. lastVisTick=%d => elapsed=%d, threshold=%d\n",
+									obs.PlayerName,
+									tgt.PlayerName,
+									currentTick,
+									lastVisTick,
+									ticksElapsed,
+									p.engagementTimeoutTicks,
+								)
+							}
+
+							delete(p.enemySpottedTick[obs.SteamID], tgt.SteamID)
+							delete(p.lastTickVisible[obs.SteamID], tgt.SteamID)
+							delete(p.lastVisibleTarget, obs.SteamID)
+						}
+					}*/
 				}
 			}
 		}
 	}
+
 	p.frameStorage.frames = append(p.frameStorage.frames, frameData)
 }
 
@@ -1250,12 +1271,52 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 		return
 	}
 
-	// Hits should not count if it was a grenade or a bomb
-	if e.Weapon.Class() != common.EqClassGrenade || e.Weapon.Type != common.EqBomb {
+	victimID := e.Player.SteamID64
+
+	// Hits should not count if it was a grenade, bomb, or team/self damage
+	if e.Weapon.Class() != common.EqClassGrenade && e.Attacker.Team != e.Player.Team && e.Attacker.SteamID64 != e.Player.SteamID64 && e.Weapon.Type != common.EqBomb {
+		// Accuracy (All) hit counts
 		stats.HitsTotal++
 
+		if e.Attacker.Name == "shmeeny" {
+			fmt.Printf("[TTD HACKING] Increment HitsTotal for shmeeny -- Current Tick:%d Victim:%s\n", p.parser.GameState().IngameTick(), e.Player.Name)
+		}
+
+		// Headshot Stats counts
 		if e.HitGroup == events.HitGroupHead {
 			stats.Headshots++
+		}
+
+		// Time To Damage tracking
+		if lastSeenID, exists := p.lastVisibleTarget[e.Attacker.SteamID64]; exists && lastSeenID == victimID {
+			if _, exists := p.firstDamageTick[e.Attacker.SteamID64]; !exists {
+				p.firstDamageTick[e.Attacker.SteamID64] = make(map[uint64]int)
+			}
+			if spottedTick, exists := p.enemySpottedTick[e.Attacker.SteamID64][victimID]; exists {
+				// They have a valid earliest sighting for this attacker->victim
+				if _, alreadyCounted := p.firstDamageTick[e.Attacker.SteamID64][victimID]; !alreadyCounted {
+					currentTick := p.parser.GameState().IngameTick()
+					ticksSinceSpotted := currentTick - spottedTick
+					timeToFirstDamageMs := float64(ticksSinceSpotted) * 15.625 // ~ ms at 64 tick or (1000/64) = 15.625, whichever approach you prefer.
+
+					/* Exclude if TTD >= 1000ms (i.e., >= 1 second)
+					 * See: https://leetify.com/blog/leetify-stats-glossary/
+					 * "We measure the time it takes from the point of you first seeing the enemy to the point where you first dealt damage to them.
+					 * Any Time to Damage of 1s+ is excluded to account for trigger discipline plays. We then use the median to exclude outliers."
+					 */
+					if timeToFirstDamageMs < 1000 {
+						stats.TimeToFirstDamage = append(stats.TimeToFirstDamage, timeToFirstDamageMs)
+					}
+
+					// Mark that we counted the first damage
+					p.firstDamageTick[e.Attacker.SteamID64][victimID] = currentTick
+
+					if e.Attacker.Name == "shmeeny" {
+						fmt.Printf("[TTD HACKING] earliestSpot:%d, currentTick:%d, ticksSinceSpotted:%d, TTDms:%.2f, (excluded if >=1000)\n",
+							spottedTick, currentTick, ticksSinceSpotted, timeToFirstDamageMs)
+					}
+				}
+			}
 		}
 	}
 
@@ -1264,7 +1325,6 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 		return
 	}
 
-	victimID := e.Player.SteamID64
 	oldHP := p.lastKnownHP[victimID]
 	actualDamage := min(e.HealthDamage, oldHP)
 
@@ -1301,56 +1361,8 @@ func (p *Parser) handlePlayerHurt(e events.PlayerHurt) {
 			fmt.Printf("[DEBUG] Player %s dealt %d damage to %s. TotalDamage: %d\n",
 				e.Attacker.Name, actualDamage, e.Player.Name, stats.TotalDamage)
 		}
-	}
 
-	p.lastKnownHP[victimID] = max(oldHP-actualDamage, 0)
-
-	// Ensure our map parser is not nil
-	if p.BspChecker != nil {
-		// Time To Damage tracking
-		if lastSeenID, exists := p.lastVisibleTarget[e.Attacker.SteamID64]; exists && lastSeenID == victimID {
-
-			if _, exists := p.firstDamageTick[e.Attacker.SteamID64]; !exists {
-				p.firstDamageTick[e.Attacker.SteamID64] = make(map[uint64]int)
-			}
-
-			if spottedTick, exists := p.enemySpottedTick[e.Attacker.SteamID64][victimID]; !exists {
-				if e.Attacker.Name == "shmeeny" {
-					fmt.Printf("[TTD HACKING] ERROR: p.lastVisibleTarget[%d] but no p.enemySpottedTick[%d][%d] exists\n", e.Attacker.SteamID64, e.Attacker.SteamID64, victimID)
-				}
-			} else {
-				ticksSinceSpotted := p.parser.GameState().IngameTick() - spottedTick
-				timeToFirstDamage := float64(ticksSinceSpotted) / 64.0 * 1000 // Convert ticks to milliseconds
-
-				if e.Attacker.Name == "shmeeny" {
-					fmt.Printf("[TTD HACKING] spottedTick: %d, ticksSinceSpotted: %d, timeToFirstDamage: %f\n", spottedTick, ticksSinceSpotted, timeToFirstDamage)
-				}
-
-				if _, exists := p.firstDamageTick[e.Attacker.SteamID64][victimID]; !exists {
-					p.firstDamageTick[e.Attacker.SteamID64][victimID] = p.parser.GameState().IngameTick()
-					stats.TimeToFirstDamage = append(stats.TimeToFirstDamage, timeToFirstDamage)
-
-					if e.Attacker.Name == "shmeeny" {
-						fmt.Printf("[TTD HACKING] New -- p.firstDamageTick[%d][%d]: %d append(stats.TimeToFirstDamage, %f)\n",
-							e.Attacker.SteamID64, victimID, p.parser.GameState().IngameTick(), timeToFirstDamage)
-					}
-				} else if oldFirstDamageTick, exists := p.firstDamageTick[e.Attacker.SteamID64][victimID]; exists && oldFirstDamageTick < p.parser.GameState().IngameTick()+64 {
-					p.firstDamageTick[e.Attacker.SteamID64][victimID] = p.parser.GameState().IngameTick()
-					stats.TimeToFirstDamage = append(stats.TimeToFirstDamage, timeToFirstDamage)
-
-					if e.Attacker.Name == "shmeeny" {
-						fmt.Printf("[TTD HACKING] Overwrite -- oldFirstDamageTick: %d p.firstDamageTick[%d][%d]: %d append(stats.TimeToFirstDamage, %f)\n",
-							oldFirstDamageTick, e.Attacker.SteamID64, victimID, p.parser.GameState().IngameTick(), timeToFirstDamage)
-					}
-				} else {
-					fmt.Printf("[TTD HACKING] No TTD update because current value is too new")
-				}
-
-			}
-		} else if p.debug && !p.warnedBspChecker {
-			fmt.Println("[DEBUG] Warning: bspChecker is nil, skipping visibility checks for damage events.")
-			p.warnedBspChecker = true
-		}
+		p.lastKnownHP[victimID] = max(oldHP-actualDamage, 0)
 	}
 }
 
