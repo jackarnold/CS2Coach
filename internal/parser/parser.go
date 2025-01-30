@@ -91,6 +91,7 @@ type Parser struct {
 	lastTickVisible        map[uint64]map[uint64]int
 	fovDegrees             float64
 	engagementTimeoutTicks int
+	currentVisibility      map[uint64]map[uint64]bool
 }
 
 func NewParser(debug bool) *Parser {
@@ -123,6 +124,7 @@ func NewParser(debug bool) *Parser {
 		smokePositions:         make(map[int]GrenadeData),
 		fovDegrees:             90,  // 90deg is apparently what we get?
 		engagementTimeoutTicks: 256, // ~1s at 64 tick
+		currentVisibility:      make(map[uint64]map[uint64]bool),
 	}
 }
 
@@ -629,49 +631,49 @@ func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 					continue
 				}
 
-				if p.rayVisible(obs, tgt) {
-					// If we've never set earliestSpot, do it now
+				isVisibleNow := p.rayVisible(obs, tgt)
+				wasVisible := false
+				if _, ok := p.currentVisibility[obs.SteamID]; !ok {
+					p.currentVisibility[obs.SteamID] = make(map[uint64]bool)
+				}
+				if prev, ok := p.currentVisibility[obs.SteamID][tgt.SteamID]; ok {
+					wasVisible = prev
+				}
+
+				// --- VISIBILITY CHANGED FROM TRUE -> FALSE ---
+				if wasVisible && !isVisibleNow {
+					// "Lost Visibility" logic
+					// e.g., remove earliest spot right away or after short buffer
+					delete(p.enemySpottedTick[obs.SteamID], tgt.SteamID)
+					delete(p.lastTickVisible[obs.SteamID], tgt.SteamID)
+					delete(p.lastVisibleTarget, obs.SteamID)
+					if obs.PlayerName == "shmeeny" {
+						fmt.Printf(
+							"[TTD HACKING] RemoveEarliestSpot obs=%s victim=%s at currentTick=%d engagementTimeoutTicks=%d\n",
+							obs.PlayerName,
+							tgt.PlayerName,
+							currentTick,
+							p.engagementTimeoutTicks,
+						)
+					}
+				}
+
+				// --- VISIBILITY CHANGED FROM FALSE -> TRUE ---
+				if !wasVisible && isVisibleNow {
+					// This is the "just spotted" logic you already do
 					if _, seen := p.enemySpottedTick[obs.SteamID][tgt.SteamID]; !seen {
 						p.enemySpottedTick[obs.SteamID][tgt.SteamID] = currentTick
-
 						if obs.PlayerName == "shmeeny" {
 							fmt.Printf("[TTD HACKING] FirstSpot - tick:%d setting spottedTick for %s sees %s\n",
 								currentTick, obs.PlayerName, tgt.PlayerName)
 						}
 					}
-
-					// Update lastTickVisible, reset noVisConsecutiveTicks
 					p.lastTickVisible[obs.SteamID][tgt.SteamID] = currentTick
-
-					// Update lastVisibleTarget (for handleWeaponFire / handlePlayerHurt usage)
 					p.lastVisibleTarget[obs.SteamID] = tgt.SteamID
-
-				} else {
-					// Not visible this frame
-					// If the last time we actually saw them was >= engagementTimeoutTicks ago, reset earliestSpot
-					/*if lastVisTick, ok := p.lastTickVisible[obs.SteamID][tgt.SteamID]; ok {
-						ticksElapsed := (currentTick - lastVisTick)
-						// We have had *no* new vision for 256 consecutive ticks => remove earliestSpot
-						if ticksElapsed >= p.engagementTimeoutTicks {
-
-							if obs.PlayerName == "shmeeny" {
-								fmt.Printf(
-									"[TTD HACKING] RemoveEarliestSpot obs=%s victim=%s at currentTick=%d. lastVisTick=%d => elapsed=%d, threshold=%d\n",
-									obs.PlayerName,
-									tgt.PlayerName,
-									currentTick,
-									lastVisTick,
-									ticksElapsed,
-									p.engagementTimeoutTicks,
-								)
-							}
-
-							delete(p.enemySpottedTick[obs.SteamID], tgt.SteamID)
-							delete(p.lastTickVisible[obs.SteamID], tgt.SteamID)
-							delete(p.lastVisibleTarget, obs.SteamID)
-						}
-					}*/
 				}
+
+				// Update the currentVisibility to reflect this frame’s state
+				p.currentVisibility[obs.SteamID][tgt.SteamID] = isVisibleNow
 			}
 		}
 	}
