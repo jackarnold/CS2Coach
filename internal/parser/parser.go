@@ -217,7 +217,7 @@ func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
 	defer p.parser.Close()
 
 	p.match = models.NewMatch()
-	p.registerEventHandlers(debug)
+	p.registerEventHandlers()
 
 	if debug {
 		fmt.Println("[DEBUG] Starting demo parse...")
@@ -315,7 +315,7 @@ func (p *Parser) GetCS2Path() string {
 	return "" // Path not found
 }
 
-func (p *Parser) registerEventHandlers(debug bool) {
+func (p *Parser) registerEventHandlers() {
 	p.parser.RegisterNetMessageHandler(p.handleServerInfo)
 	p.parser.RegisterEventHandler(p.handleMatchStart)
 	p.parser.RegisterEventHandler(p.handleKill)
@@ -327,10 +327,12 @@ func (p *Parser) registerEventHandlers(debug bool) {
 	p.parser.RegisterEventHandler(p.handleUtility)
 	p.parser.RegisterEventHandler(p.handleActivity)
 	p.parser.RegisterEventHandler(p.handlePeekTracking)
-	p.parser.RegisterEventHandler(p.handleFrameDone)
+	//p.parser.RegisterEventHandler(p.handleFrameDone)
 	p.parser.RegisterEventHandler(p.handleFlashEvent)
 	p.parser.RegisterEventHandler(p.handleSmokeDetonate)
 	p.parser.RegisterEventHandler(p.handleSmokeExpire)
+	//p.parser.RegisterEventHandler(p.handleGenericEvent) // This is only for raw debugging
+	p.parser.RegisterNetMessageHandler(p.handleEntityUpdate)
 }
 
 func (p *Parser) handleRoundStart(e events.RoundStart) {
@@ -557,21 +559,36 @@ func (p *Parser) updateMapAreaStats(e events.Kill) {
 	}
 }
 
-func (p *Parser) handleFrameDone(e events.FrameDone) {
+/*func (p *Parser) handleGenericEvent(e events.GenericGameEvent) {
+	fmt.Printf("handleGenericEvent: e.Name: %s tick: %d\n", e.Name, p.currentTick)
+}*/
+
+/*func (p *Parser) handleFrameDone(e events.FrameDone) {
+	p.trackPerFramePlayerData(p.parser.GameState())
+}*/
+
+func (p *Parser) handleEntityUpdate(msg *msgs2.CSVCMsg_PacketEntities) {
+	// fmt.Printf("handleEntityUpdate @ tick: %d\n", p.parser.GameState().IngameTick())
+
 	p.trackPerFramePlayerData(p.parser.GameState())
 }
 
 func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
+	currentTick := p.parser.GameState().IngameTick()
+
+	// At the beginning of the demo IngameTick can be wonky according to the documentation
+	if currentTick < 0 {
+		return
+	}
+
 	frameData := FrameData{
-		Tick:    p.parser.GameState().IngameTick(),
+		Tick:    currentTick,
 		Players: []PlayerFrameData{},
 	}
 
 	if p.enemySpottedTick == nil {
 		p.enemySpottedTick = make(map[uint64]map[uint64]int)
 	}
-
-	currentTick := p.parser.GameState().IngameTick()
 
 	// Gather player data
 	for _, player := range gs.Participants().Playing() {
@@ -1130,7 +1147,6 @@ func (p *Parser) handleWeaponFire(e events.WeaponFire) {
 		return
 	}
 
-	// This will count all shots regardless of if they were at a teammate... is that correct?
 	stats.ShotsTotal++
 
 	var currentVelocity float64
