@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -77,7 +78,12 @@ func handleInspectVPK(path, outputDir, mapName string, recursive bool) {
 		log.Fatalf("Failed to create output directory: %v", err)
 	}
 
-	loader := parser.NewBSPLoader(path)
+	logLevel := slog.LevelDebug
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: logLevel,
+	}))
+
+	loader := parser.NewBSPLoader(path, *logger)
 
 	_, err := loader.LoadBSPForMap(mapName)
 	if err != nil {
@@ -95,19 +101,28 @@ func handleAnalyze(demoPath, playerName, steamID string, debug, verbose bool) {
 		log.Fatal("Please provide either player name or Steam ID")
 	}
 
-	// Step 1: Parse demo to determine the map name
-	p := parser.NewParser(debug)
-	fmt.Printf("Parsing demo file to determine map: %s\n", demoPath)
-	match, err := p.ParseDemo(demoPath, debug)
-	if err != nil {
-		log.Fatalf("Error parsing demo: %v", err)
+	var logLevel slog.Level
+	if debug {
+		logLevel = slog.LevelDebug
+	} else if verbose {
+		logLevel = slog.LevelWarn
+	} else {
+		logLevel = slog.LevelInfo
 	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: logLevel,
+	}))
+
+	c := parser.NewCollector(logger)
+	match, err := c.Collect(demoPath)
+	logger.Error("Error collecting demo data from demoPath: %s err: %s\n", demoPath, err)
 
 	mapName := match.MapName
 	if mapName == "" {
 		log.Fatal("Unable to determine map name from demo file")
 	}
-	fmt.Printf("Map detected in demo: %s\n", mapName)
+	logger.Info("Map detected in demo: %s\n", mapName)
 
 	// Step 2: Analyze the parsed match data
 	a := analyzer.NewAnalyzer()

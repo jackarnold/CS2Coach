@@ -4,7 +4,7 @@ import "time"
 
 type Match struct {
 	MapName     string
-	TickRate    float64
+	TickRate    float32
 	Events      []Event
 	Date        string
 	PlayerStats map[uint64]*PlayerStats // SteamID64 -> Stats

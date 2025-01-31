@@ -3,6 +3,7 @@ package parser
 import (
 	"fmt"
 	"log"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -92,6 +93,7 @@ type Parser struct {
 	fovDegrees             float64
 	engagementTimeoutTicks int
 	currentVisibility      map[uint64]map[uint64]bool
+	lostVisTick            map[uint64]map[uint64]int // attacker => (victim => tick we lost visibility)
 }
 
 func NewParser(debug bool) *Parser {
@@ -125,6 +127,7 @@ func NewParser(debug bool) *Parser {
 		fovDegrees:             90,  // 90deg is apparently what we get?
 		engagementTimeoutTicks: 256, // ~1s at 64 tick
 		currentVisibility:      make(map[uint64]map[uint64]bool),
+		lostVisTick:            make(map[uint64]map[uint64]int),
 	}
 }
 
@@ -249,7 +252,7 @@ func (p *Parser) ParseDemo(path string, debug bool) (*models.Match, error) {
 		return p.match, nil
 	}
 
-	loader := NewBSPLoader(cs2Path)
+	loader := NewBSPLoader(cs2Path, slog.Logger{})
 	bspChecker, err := loader.LoadBSPForMap(p.match.MapName)
 	if err != nil {
 		if debug {
@@ -577,8 +580,15 @@ func (p *Parser) handleEntityUpdate(msg *msgs2.CSVCMsg_PacketEntities) {
 
 func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 	currentTick := p.parser.GameState().IngameTick()
+	if p.lastProcessedTick < 0 {
+		p.lastProcessedTick = currentTick
+	}
 
-	// At the beginning of the demo IngameTick can be wonky according to the documentation
+	if currentTick == p.lastProcessedTick {
+		return
+	}
+
+	// At the beginning of the demo, IngameTick can be invalid
 	if currentTick < 0 {
 		return
 	}
@@ -588,11 +598,15 @@ func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 		Players: []PlayerFrameData{},
 	}
 
+	// Ensure maps are initialized
 	if p.enemySpottedTick == nil {
 		p.enemySpottedTick = make(map[uint64]map[uint64]int)
 	}
+	if p.lostVisTick == nil {
+		p.lostVisTick = make(map[uint64]map[uint64]int)
+	}
 
-	// Gather player data
+	// Gather current player data
 	for _, player := range gs.Participants().Playing() {
 		if player.SteamID64 == 0 {
 			continue
@@ -610,6 +624,7 @@ func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 		frameData.Players = append(frameData.Players, pFrame)
 	}
 
+	// Only do visibility checks if we have a BspChecker
 	if p.BspChecker != nil {
 		for i := range frameData.Players {
 			obs := frameData.Players[i]
@@ -617,12 +632,18 @@ func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 				continue
 			}
 
+			// Ensure submaps exist for this observer
 			if _, ok := p.enemySpottedTick[obs.SteamID]; !ok {
 				p.enemySpottedTick[obs.SteamID] = make(map[uint64]int)
 			}
-
 			if _, ok := p.lastTickVisible[obs.SteamID]; !ok {
 				p.lastTickVisible[obs.SteamID] = make(map[uint64]int)
+			}
+			if _, ok := p.currentVisibility[obs.SteamID]; !ok {
+				p.currentVisibility[obs.SteamID] = make(map[uint64]bool)
+			}
+			if _, ok := p.lostVisTick[obs.SteamID]; !ok {
+				p.lostVisTick[obs.SteamID] = make(map[uint64]int)
 			}
 
 			for j := range frameData.Players {
@@ -631,36 +652,18 @@ func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 					continue
 				}
 
+				// 1) Check current & previous visibility
 				isVisibleNow := p.rayVisible(obs, tgt)
-				wasVisible := false
-				if _, ok := p.currentVisibility[obs.SteamID]; !ok {
-					p.currentVisibility[obs.SteamID] = make(map[uint64]bool)
-				}
-				if prev, ok := p.currentVisibility[obs.SteamID][tgt.SteamID]; ok {
-					wasVisible = prev
-				}
+				wasVisible := p.currentVisibility[obs.SteamID][tgt.SteamID]
 
-				// --- VISIBILITY CHANGED FROM TRUE -> FALSE ---
+				// 2) If we just lost visibility (true->false), record the tick
 				if wasVisible && !isVisibleNow {
-					// "Lost Visibility" logic
-					// e.g., remove earliest spot right away or after short buffer
-					delete(p.enemySpottedTick[obs.SteamID], tgt.SteamID)
-					delete(p.lastTickVisible[obs.SteamID], tgt.SteamID)
-					delete(p.lastVisibleTarget, obs.SteamID)
-					if obs.PlayerName == "shmeeny" {
-						fmt.Printf(
-							"[TTD HACKING] RemoveEarliestSpot obs=%s victim=%s at currentTick=%d engagementTimeoutTicks=%d\n",
-							obs.PlayerName,
-							tgt.PlayerName,
-							currentTick,
-							p.engagementTimeoutTicks,
-						)
-					}
+					p.lostVisTick[obs.SteamID][tgt.SteamID] = currentTick
 				}
 
-				// --- VISIBILITY CHANGED FROM FALSE -> TRUE ---
+				// 3) If we just gained visibility (false->true), set earliestSpot if needed
 				if !wasVisible && isVisibleNow {
-					// This is the "just spotted" logic you already do
+					// If we've never set earliestSpot, do it now
 					if _, seen := p.enemySpottedTick[obs.SteamID][tgt.SteamID]; !seen {
 						p.enemySpottedTick[obs.SteamID][tgt.SteamID] = currentTick
 						if obs.PlayerName == "shmeeny" {
@@ -670,9 +673,33 @@ func (p *Parser) trackPerFramePlayerData(gs dem.GameState) {
 					}
 					p.lastTickVisible[obs.SteamID][tgt.SteamID] = currentTick
 					p.lastVisibleTarget[obs.SteamID] = tgt.SteamID
+
+					// We reacquired visibility, so clear lostVisTick
+					delete(p.lostVisTick[obs.SteamID], tgt.SteamID)
 				}
 
-				// Update the currentVisibility to reflect this frame’s state
+				// 4) If still not visible, see how long it's been since we lost sight
+				if !isVisibleNow {
+					const shortBuffer = 16 // e.g. ~250ms at 64 tick
+					lostTick, hasLost := p.lostVisTick[obs.SteamID][tgt.SteamID]
+					if hasLost {
+						// If we've been invisible for >= shortBuffer ticks, remove earliestSpot
+						if currentTick-lostTick >= shortBuffer {
+							if _, hasKey := p.enemySpottedTick[obs.SteamID][tgt.SteamID]; hasKey {
+								delete(p.enemySpottedTick[obs.SteamID], tgt.SteamID)
+								delete(p.lastTickVisible[obs.SteamID], tgt.SteamID)
+								delete(p.lastVisibleTarget, obs.SteamID)
+
+								if obs.PlayerName == "shmeeny" {
+									fmt.Printf("[TTD HACKING] Removing earliestSpot for %s->%s at tick %d after %d consecutive invisible ticks\n",
+										obs.PlayerName, tgt.PlayerName, currentTick, currentTick-lostTick)
+								}
+							}
+						}
+					}
+				}
+
+				// 5) Update the currentVisibility for next iteration
 				p.currentVisibility[obs.SteamID][tgt.SteamID] = isVisibleNow
 			}
 		}
@@ -877,7 +904,7 @@ func (p *Parser) loadBspData(debug bool) error {
 
 	// Initialize the BSP checker
 	var err error
-	p.BspChecker, err = NewBSPVisibilityChecker(bspPath) // Replace with your BSP loader logic
+	p.BspChecker, err = NewBSPVisibilityChecker(bspPath, "", slog.Logger{}) // Replace with your BSP loader logic
 	if err != nil {
 		return err
 	}

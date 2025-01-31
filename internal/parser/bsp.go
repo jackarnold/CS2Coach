@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ type BSPLoader struct {
 	cs2Path  string
 	tempDir  string
 	mapsPath string
+	logger   slog.Logger
 }
 
 type Vector3 struct {
@@ -81,6 +83,7 @@ type BSPVisibilityChecker struct {
 	visibilityData []byte
 	worldData      []byte
 	physicsData    []byte
+	logger         slog.Logger
 }
 
 // Lump IDs for Source 2 BSP format
@@ -99,11 +102,12 @@ const (
 const defaultCS2Path = `C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive\game\csgo`
 
 // NewBSPLoader creates a new BSPLoader with the given CS2 installation path
-func NewBSPLoader(cs2Path string) *BSPLoader {
+func NewBSPLoader(cs2Path string, logger slog.Logger) *BSPLoader {
 	return &BSPLoader{
 		cs2Path:  cs2Path,
 		mapsPath: filepath.Join(cs2Path, "maps"),
 		tempDir:  filepath.Join(os.TempDir(), "cs2coach_bsp"),
+		logger:   logger,
 	}
 }
 
@@ -163,7 +167,7 @@ func (b *BSPVisibilityChecker) LoadVVISData(vvisPath string) error {
 	b.visibilityData = data
 
 	// Debug log (optional)
-	fmt.Printf("[DEBUG] Successfully loaded visibility data from: %s\n", vvisPath)
+	b.logger.Debug("Successfully loaded visibility data", "vvisPath", vvisPath)
 
 	return nil
 }
@@ -171,9 +175,7 @@ func (b *BSPVisibilityChecker) LoadVVISData(vvisPath string) error {
 // LoadBSPForMap updated to work with Source 2 map files
 // LoadBSPForMap updated to ensure correct paths for Source 2 map files
 func (l *BSPLoader) LoadBSPForMap(mapName string) (*BSPVisibilityChecker, error) {
-	fmt.Printf("Attempting to load BSP for map %s\n", mapName)
-	fmt.Printf("CS2 Path: %s\n", l.cs2Path)
-	fmt.Printf("Maps Path: %s\n", l.mapsPath)
+	l.logger.Debug("Attempting to load BSP Data", "Map Name", mapName, "CS2 Path", l.cs2Path, "Maps Path", l.mapsPath)
 
 	if !fileExists(l.cs2Path) {
 		return nil, fmt.Errorf("CS2 path not found: %s", l.cs2Path)
@@ -191,6 +193,7 @@ func (l *BSPLoader) LoadBSPForMap(mapName string) (*BSPVisibilityChecker, error)
 		if err := l.processVPKFile(mapVPKPath, mapName, mapExtractDir); err == nil {
 			// Successfully found and extracted map files
 			checker := &BSPVisibilityChecker{}
+			checker.logger = l.logger
 			if err := checker.LoadSource2MapFiles(mapExtractDir); err != nil {
 				return nil, fmt.Errorf("failed to load Source 2 map files: %v", err)
 			}
@@ -223,8 +226,8 @@ func (l *BSPLoader) LoadBSPForMap(mapName string) (*BSPVisibilityChecker, error)
 }
 
 // Update NewBSPVisibilityChecker to use the loader
-func NewBSPVisibilityChecker(mapName string) (*BSPVisibilityChecker, error) {
-	loader := NewBSPLoader(defaultCS2Path)
+func NewBSPVisibilityChecker(mapName string, cs2MapsPath string, logger slog.Logger) (*BSPVisibilityChecker, error) {
+	loader := NewBSPLoader(cs2MapsPath, logger)
 	return loader.LoadBSPForMap(mapName)
 }
 
@@ -331,7 +334,10 @@ func (l *BSPLoader) processVPKFile(vpkPath, mapName, outputDir string) error {
 		for _, reqFile := range requiredFiles {
 			if entryPath == strings.ToLower(reqFile) {
 				foundFiles[reqFile] = entry
-				fmt.Printf("Found required file: %s\n", entry.Filename())
+
+				l.logger.Info("Found required file",
+					slog.String("filename", entry.Filename()),
+				)
 			}
 		}
 	}
@@ -376,12 +382,12 @@ func (l *BSPLoader) extractMapFile(entry vpk.Entry, outputDir string) error {
 		return fmt.Errorf("failed to write file: %v", err)
 	}
 
-	fmt.Printf("Extracted %s (%d bytes)\n", fullPath, written)
+	l.logger.Debug("Map File Extracted", "fullPath", fullPath, "written", written)
 	return nil
 }
 
 func (l *BSPLoader) extractBSPFiles(pak vpk.VPK, mapName, outputDir string) error {
-	fmt.Printf("Searching for BSP files in VPK entries...\n")
+	l.logger.Debug("Searching for vvis_c files in VPK entries")
 	mapPattern := strings.ToLower(mapName + ".bsp")
 
 	for _, entry := range pak.Entries() {
@@ -408,8 +414,12 @@ func (l *BSPLoader) extractBSPFiles(pak vpk.VPK, mapName, outputDir string) erro
 }
 
 func (l *BSPLoader) extractBSPFile(entry vpk.Entry, outputDir string) error {
-	fmt.Printf("Found BSP: %s (size: %d bytes, CRC: %x) in Path: %s\n",
-		entry.Filename(), entry.Length(), entry.CRC(), entry.Path())
+	l.logger.Info("Found BSP",
+		slog.String("filename", entry.Filename()),
+		slog.Int("size_bytes", int(entry.Length())),
+		slog.String("crc", fmt.Sprintf("%x", entry.CRC())),
+		slog.String("path", entry.Path()),
+	)
 
 	reader, err := entry.Open()
 	if err != nil {
@@ -429,7 +439,11 @@ func (l *BSPLoader) extractBSPFile(entry vpk.Entry, outputDir string) error {
 		return fmt.Errorf("failed to extract BSP: %v", err)
 	}
 
-	fmt.Printf("Extracted BSP to: %s (%d bytes)\n", outputFile, written)
+	l.logger.Info("Extracted BSP",
+		slog.String("output_file", outputFile),
+		slog.Int64("size_bytes", written), // Assuming `written` is an int
+	)
+
 	return nil
 }
 
