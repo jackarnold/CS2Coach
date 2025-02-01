@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/NublyBR/go-vpk"
 	"github.com/golang/geo/r3"
@@ -84,6 +85,53 @@ type BSPVisibilityChecker struct {
 	worldData      []byte
 	physicsData    []byte
 	logger         slog.Logger
+	materialData   map[int]string
+	materialCache  MaterialCache
+}
+
+// Material penetration properties
+type MaterialProperties struct {
+	penetrationModifier float32
+	isWallbangable      bool
+}
+
+var materialPenetration = map[string]MaterialProperties{
+	"DEFAULT":     {penetrationModifier: 0.0, isWallbangable: false},
+	"GLASS":       {penetrationModifier: 0.8, isWallbangable: true},
+	"WOOD":        {penetrationModifier: 0.6, isWallbangable: true},
+	"METAL":       {penetrationModifier: 0.3, isWallbangable: true},
+	"VENT":        {penetrationModifier: 0.5, isWallbangable: true},
+	"GRATE":       {penetrationModifier: 0.8, isWallbangable: true},
+	"THIN_METAL":  {penetrationModifier: 0.4, isWallbangable: true},
+	"CONCRETE":    {penetrationModifier: 0.2, isWallbangable: true},
+	"BRICK":       {penetrationModifier: 0.25, isWallbangable: true},
+	"CHAIN_FENCE": {penetrationModifier: 0.9, isWallbangable: true},
+}
+
+type MaterialCache struct {
+	pointToMaterial map[string]string
+	mutex           sync.RWMutex
+}
+
+func NewMaterialCache() *MaterialCache {
+	return &MaterialCache{
+		pointToMaterial: make(map[string]string),
+	}
+}
+
+func (mc *MaterialCache) getCachedMaterial(point Vector3) (string, bool) {
+	key := fmt.Sprintf("%.0f,%.0f,%.0f", point.X, point.Y, point.Z)
+	mc.mutex.RLock()
+	defer mc.mutex.RUnlock()
+	mat, exists := mc.pointToMaterial[key]
+	return mat, exists
+}
+
+func (mc *MaterialCache) cacheMaterial(point Vector3, material string) {
+	key := fmt.Sprintf("%.0f,%.0f,%.0f", point.X, point.Y, point.Z)
+	mc.mutex.Lock()
+	defer mc.mutex.Unlock()
+	mc.pointToMaterial[key] = material
 }
 
 // Lump IDs for Source 2 BSP format
@@ -98,8 +146,6 @@ const (
 	LUMP_EDGES     = 12
 	LUMP_SURFEDGES = 13
 )
-
-const defaultCS2Path = `C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive\game\csgo`
 
 // NewBSPLoader creates a new BSPLoader with the given CS2 installation path
 func NewBSPLoader(cs2Path string, logger slog.Logger) *BSPLoader {
@@ -354,7 +400,7 @@ func (l *BSPLoader) processVPKFile(vpkPath, mapName, outputDir string) error {
 		return nil
 	}
 
-	return fmt.Errorf("Not all required map files found")
+	return fmt.Errorf("not all required map files found")
 }
 
 func (l *BSPLoader) extractMapFile(entry vpk.Entry, outputDir string) error {
@@ -606,7 +652,7 @@ func (b *BSPVisibilityChecker) IsVisible(player PlayerTickData, targetPlayer Pla
 				if distance > 500 && math.Abs(elevationDiff) > modelHeight {
 					midPoint := from.Add(rotatedDir.Mul(0.5))
 					midEnd := Vector3{float32(midPoint.X), float32(midPoint.Y), float32(midPoint.Z)}
-					if !b.bspData.hasVisualBlocker(start, midEnd) {
+					if blocked, _ := b.bspData.hasVisualBlocker(start, midEnd, b); !blocked {
 						continue
 					}
 				}
@@ -614,7 +660,8 @@ func (b *BSPVisibilityChecker) IsVisible(player PlayerTickData, targetPlayer Pla
 				spreadTarget := from.Add(rotatedDir)
 				end := Vector3{float32(spreadTarget.X), float32(spreadTarget.Y), float32(spreadTarget.Z)}
 
-				if !b.bspData.hasVisualBlocker(start, end) {
+				blocked, penetration := b.bspData.hasVisualBlocker(start, end, b)
+				if !blocked || penetration > 0.3 { // Allow visibility through high-penetration materials
 					return true
 				}
 			}
@@ -634,97 +681,40 @@ func rotateVector(v, axis r3.Vector, angle float64) r3.Vector {
 		axis.Mul(axis.Dot(v) * (1 - cos)))
 }
 
-// First old
-// IsVisible determines if there's a clear line of sight between two points
-/*func (b *BSPVisibilityChecker) IsVisible(from, to r3.Vector) bool {
-	// Simple distance check first
-	direction := to.Sub(from)
-	distance := direction.Norm()
-	if distance > 2000 {
-		return false
-	}
-
-	// Early out if BSP data isn't loaded
-	if b.bspData == nil {
-		return false
-	}
-
-	// Convert to local coords
-	start := Vector3{float32(from.X), float32(from.Y), float32(from.Z)}
-	end := Vector3{float32(to.X), float32(to.Y), float32(to.Z)}
-
-	// Check main visibility line
-	return !b.bspData.hasVisualBlocker(start, end)
-}*/
-// Second old
-/*func (b *BSPVisibilityChecker) IsVisible(from, to, playerForward r3.Vector) bool {
-// Simple distance check first
-direction := to.Sub(from)
-distance := direction.Norm()
-if distance > 2000 {
-	return false
-}
-
-// Normalize vectors
-directionToTarget := direction.Normalize()
-playerViewDirection := playerForward.Normalize()
-
-// Calculate the dot product
-dot := directionToTarget.Dot(playerViewDirection)
-
-// Convert FOV threshold to radians (e.g., 90 degrees)
-// 20 Degrees seems to capture more events but TTD is still a bit lower than it should be
-// 25 Degrees captures less events but TTD is still a bit lower than it should be
-fovThreshold := math.Cos(20 * (math.Pi / 180)) // 20 degrees in radians
-
-if dot < fovThreshold {
-	return false // Target is outside of player's FOV
-}
-
-// Early out if BSP data isn't loaded
-if b.bspData == nil {
-	return false
-}
-
-// Convert to local coords
-start := Vector3{float32(from.X), float32(from.Y), float32(from.Z)}
-end := Vector3{float32(to.X), float32(to.Y), float32(to.Z)}
-
-/*b.logger.Debug("IsVisible Function -- Visibility check",
-"player", from,
-"target", to,
-"distance", distance,
-"result", !b.bspData.hasVisualBlocker(start, end))*/
-
-// Check main visibility line
-/*	return !b.bspData.hasVisualBlocker(start, end)
-}*/
-
 // hasVisualBlocker checks if there are any solid nodes between two points
-func (bsp *BSPData) hasVisualBlocker(start, end Vector3) bool {
+func (bsp *BSPData) hasVisualBlocker(start, end Vector3, checker *BSPVisibilityChecker) (bool, float32) {
 	maxSteps := 32
 	steps := 0
+	maxPenetration := float32(0.0)
+	hasSolid := false
 
-	// Points in 3D space between start and end
 	points := []Vector3{
 		start,
 		{(start.X + end.X) / 2, (start.Y + end.Y) / 2, (start.Z + end.Z) / 2},
 		end,
 	}
 
-	// Check if any point along the line intersects with solid
+	distance := math.Sqrt(float64(
+		(end.X-start.X)*(end.X-start.X) +
+			(end.Y-start.Y)*(end.Y-start.Y) +
+			(end.Z-start.Z)*(end.Z-start.Z)))
+
+	// Reduce checks for distant targets
+	if distance > 1000 {
+		points = []Vector3{start, end}
+	}
+
 	for _, point := range points {
 		node := int32(0)
 		solid := false
 
-		// Walk down BSP tree until we hit a leaf
 		for steps < maxSteps {
 			steps++
 
-			if node < 0 { // Leaf node
+			if node < 0 {
 				leafIndex := ^node
 				if leafIndex >= int32(len(bsp.Leaves)) {
-					return true
+					return true, 0
 				}
 				leaf := bsp.Leaves[leafIndex]
 				solid = leaf.Contents&1 != 0
@@ -732,16 +722,32 @@ func (bsp *BSPData) hasVisualBlocker(start, end Vector3) bool {
 			}
 
 			if node >= int32(len(bsp.Nodes)) {
-				return true
+				return true, 0
 			}
 
 			current := bsp.Nodes[node]
 			if current.PlaneNum >= int32(len(bsp.Planes)) {
-				return true
+				return true, 0
 			}
 
 			plane := bsp.Planes[current.PlaneNum]
 			dist := dotProduct(plane.Normal, point) - plane.Distance
+
+			if solid && !hasSolid {
+				hasSolid = true
+				// Only check materials when we hit something solid
+				if mat, exists := checker.materialCache.getCachedMaterial(point); exists {
+					if props, ok := materialPenetration[mat]; ok && props.penetrationModifier > maxPenetration {
+						maxPenetration = props.penetrationModifier
+					}
+				} else {
+					material := checker.getMaterialAtPoint(point)
+					checker.materialCache.cacheMaterial(point, material)
+					if props, ok := materialPenetration[material]; ok && props.penetrationModifier > maxPenetration {
+						maxPenetration = props.penetrationModifier
+					}
+				}
+			}
 
 			if dist >= 0 {
 				node = current.Children[0]
@@ -750,12 +756,123 @@ func (bsp *BSPData) hasVisualBlocker(start, end Vector3) bool {
 			}
 		}
 
-		if solid {
-			return true
+		if solid && maxPenetration < 0.3 {
+			return true, maxPenetration
 		}
 	}
 
-	return false
+	return false, maxPenetration
+}
+
+func (b *BSPVisibilityChecker) parseMaterialData() error {
+	if b.worldData == nil {
+		return fmt.Errorf("world data not loaded")
+	}
+
+	// Parse world.vwrld_c for material references
+	// Format: VWLD header followed by material entries
+	reader := bytes.NewReader(b.worldData)
+
+	// Skip VWLD header (typically 16 bytes)
+	if _, err := reader.Seek(16, io.SeekStart); err != nil {
+		return fmt.Errorf("failed to skip header: %v", err)
+	}
+
+	b.materialData = make(map[int]string)
+
+	// Read material entries
+	// Each entry: 4 bytes index + variable length material name
+	for {
+		var index int32
+		err := binary.Read(reader, binary.LittleEndian, &index)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read material index: %v", err)
+		}
+
+		// Read material name length (1 byte)
+		var nameLen uint8
+		if err := binary.Read(reader, binary.LittleEndian, &nameLen); err != nil {
+			return fmt.Errorf("failed to read name length: %v", err)
+		}
+
+		// Read material name
+		nameBuf := make([]byte, nameLen)
+		if _, err := reader.Read(nameBuf); err != nil {
+			return fmt.Errorf("failed to read material name: %v", err)
+		}
+
+		matName := string(nameBuf)
+		b.materialData[int(index)] = matName
+	}
+
+	return nil
+}
+
+func (b *BSPVisibilityChecker) getMaterialAtPoint(point Vector3) string {
+	if b.materialData == nil {
+		if err := b.parseMaterialData(); err != nil {
+			b.logger.Error("Failed to parse material data", "error", err)
+			return "DEFAULT"
+		}
+	}
+
+	// Find closest surface to point
+	var closestDist float32 = math.MaxFloat32
+	var materialIndex int = -1
+
+	// Traverse BSP tree to find closest surface
+	node := int32(0)
+	for node >= 0 && node < int32(len(b.bspData.Nodes)) {
+		current := b.bspData.Nodes[node]
+		if current.PlaneNum >= int32(len(b.bspData.Planes)) {
+			break
+		}
+
+		plane := b.bspData.Planes[current.PlaneNum]
+		dist := dotProduct(plane.Normal, point) - plane.Distance
+
+		if dist < closestDist {
+			closestDist = dist
+			materialIndex = int(current.FirstFace)
+		}
+
+		if dist >= 0 {
+			node = current.Children[0]
+		} else {
+			node = current.Children[1]
+		}
+	}
+
+	if materialIndex != -1 {
+		if material, exists := b.materialData[materialIndex]; exists {
+			// Map material name to penetration type
+			switch {
+			case strings.Contains(material, "glass"):
+				return "GLASS"
+			case strings.Contains(material, "wood"):
+				return "WOOD"
+			case strings.Contains(material, "metal"):
+				return "METAL"
+			case strings.Contains(material, "vent"):
+				return "VENT"
+			case strings.Contains(material, "grate"):
+				return "GRATE"
+			case strings.Contains(material, "concrete"):
+				return "CONCRETE"
+			case strings.Contains(material, "brick"):
+				return "BRICK"
+			case strings.Contains(material, "fence"):
+				return "CHAIN_FENCE"
+			default:
+				return "DEFAULT"
+			}
+		}
+	}
+
+	return "DEFAULT"
 }
 
 func readLumpData(r io.Reader, offset int64, size int) ([]byte, error) {
