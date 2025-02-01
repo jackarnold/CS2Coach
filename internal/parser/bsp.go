@@ -543,7 +543,9 @@ func (b *BSPVisibilityChecker) IsVisible(from, to, playerForward r3.Vector) bool
 	dot := directionToTarget.Dot(playerViewDirection)
 
 	// Convert FOV threshold to radians (e.g., 90 degrees)
-	fovThreshold := math.Cos(90 * (math.Pi / 180)) // 90 degrees in radians
+	// 20 Degrees seems to capture more events but TTD is still a bit lower than it should be
+	// 25 Degrees captures less events but TTD is still a bit lower than it should be
+	fovThreshold := math.Cos(20 * (math.Pi / 180)) // 20 degrees in radians
 
 	if dot < fovThreshold {
 		return false // Target is outside of player's FOV
@@ -558,11 +560,11 @@ func (b *BSPVisibilityChecker) IsVisible(from, to, playerForward r3.Vector) bool
 	start := Vector3{float32(from.X), float32(from.Y), float32(from.Z)}
 	end := Vector3{float32(to.X), float32(to.Y), float32(to.Z)}
 
-	b.logger.Debug("Visibility check",
-		"player", from,
-		"target", to,
-		"distance", distance,
-		"result", !b.bspData.hasVisualBlocker(start, end))
+	/*b.logger.Debug("IsVisible Function -- Visibility check",
+	"player", from,
+	"target", to,
+	"distance", distance,
+	"result", !b.bspData.hasVisualBlocker(start, end))*/
 
 	// Check main visibility line
 	return !b.bspData.hasVisualBlocker(start, end)

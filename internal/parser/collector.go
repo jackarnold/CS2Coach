@@ -402,21 +402,17 @@ func (c *Collector) AnalyzeTimeToDamage() {
 			}
 
 			for victimID, damage := range playerTick.DamageDealtToPlayer {
-				if playerTick.PlayerName == "shmeeny" {
-					c.logger.Debug("DamageDealtToPlayer",
-						"tick", tick,
-						"PlayerName", playerTick.PlayerName,
-						"PlayerID", playerTick.SteamID,
-						"VictimName", c.perTickInfo[tick][victimID].PlayerName,
-						"Damage", damage.HealthDamage,
-						"ArmorDamage", damage.ArmorDamage,
-						"PlayerPosition", playerTick.Position,
-						"VictimPosition", c.perTickInfo[tick][victimID].Position,
-					)
-
-				}
-
 				if damage.HealthDamage > 0 {
+					if playerTick.PlayerName == "shmeeny" {
+						c.logger.Debug("DamageDealt",
+							"tick", tick,
+							"PlayerName", playerTick.PlayerName,
+							"PlayerID", steamID,
+							"VictimName", c.perTickInfo[tick][victimID].PlayerName,
+							"VictimID", victimID,
+							"Damage", damage.HealthDamage,
+						)
+					}
 					firstSightTick, exists := c.findLastContinuousVisibilityStart(steamID, victimID, tick)
 					if !exists {
 						continue
@@ -426,29 +422,20 @@ func (c *Collector) AnalyzeTimeToDamage() {
 
 					if timeToDamage < 0 {
 						if playerTick.PlayerName == "shmeeny" {
-							c.logger.Warn("Negative reaction time detected!",
-								"player", playerTick.PlayerName,
-								"reactionTimeMs", timeToDamage,
-								"tick", tick,
-								"firstSightTick", firstSightTick)
 							continue
 						}
 					}
 
-					if timeToDamage >= 100 && timeToDamage < 1000 {
+					if timeToDamage > 0 && timeToDamage < 1000 {
 						if playerTick.PlayerName == "shmeeny" {
-							c.logger.Debug("Player time to damage",
+							c.logger.Warn("Player time to damage",
 								"player", playerTick.PlayerName,
 								"steamID", steamID,
 								"reactionTimeMs", timeToDamage,
 								"damageAmount", damage.HealthDamage)
 						}
 					} else {
-						if playerTick.PlayerName == "shmeeny" {
-							c.logger.Debug("Reaction time out of expected range",
-								"player", playerTick.PlayerName,
-								"reactionTimeMs", timeToDamage)
-						}
+						continue
 					}
 				}
 			}
@@ -468,7 +455,7 @@ func (c *Collector) findLastContinuousVisibilityStart(playerID, targetID uint64,
 		}
 
 		playerTick, exists := playerData[playerID]
-		if !exists || !playerTick.IsAlive {
+		if !exists || !playerTick.IsAlive || playerTick.IsBlinded {
 			continue
 		}
 
@@ -484,6 +471,16 @@ func (c *Collector) findLastContinuousVisibilityStart(playerID, targetID uint64,
 		// END EVIL TESTING HACK -- REMOVE ME
 
 		isVisible := c.bspChecker.IsVisible(playerTick.Position, targetTick.Position, playerTick.ForwardVector())
+
+		/*c.logger.Debug("findLastContinuousVisibilityStart -- Visibility check",
+			"tick", tick,
+			"player", playerTick.PlayerName,
+			"target", targetTick.PlayerName,
+			"isVisible", isVisible,
+			"forwardVector", playerTick.ForwardVector(),
+			"playerPos", playerTick.Position,
+			"targetPos", targetTick.Position,
+		)*/
 
 		if isVisible {
 			if lastSeenTick == -1 { // First tick of seeing the target
@@ -512,179 +509,3 @@ func (c *Collector) findLastContinuousVisibilityStart(playerID, targetID uint64,
 
 	return 0, false
 }
-
-/*func (c *Collector) findLastContinuousVisibilityStart(playerID, targetID uint64, currentTick int) (int, bool) {
-	const maxLookbackTicks = 128 // ~2 seconds at 64 tick
-
-	startTick := currentTick - maxLookbackTicks
-	if startTick < 0 {
-		startTick = 0
-	}
-
-	var firstSeenTick = -1
-	var lastSeenTick = -1
-	var lostVisibilityTick = -1
-
-	for tick := currentTick; tick >= startTick; tick-- {
-		playerData, exists := c.perTickInfo[tick]
-		if !exists {
-			continue
-		}
-
-		playerTick, exists := playerData[playerID]
-		if !exists || !playerTick.IsAlive {
-			continue
-		}
-
-		targetTick, exists := playerData[targetID]
-		if !exists || !targetTick.IsAlive {
-			continue
-		}
-
-		// EVIL TESTING HACK -- REMOVE ME
-		if playerTick.SteamID != 76561197991944713 {
-			continue
-		}
-		// END EVIL TESTING HACK -- REMOVE ME
-
-		isVisible := c.bspChecker.IsVisible(playerTick.Position, targetTick.Position, playerTick.ForwardVector())
-
-		if isVisible {
-			if lastSeenTick == -1 { // First moment of seeing the target
-				lastSeenTick = tick
-			}
-			firstSeenTick = tick    // Continuously update until visibility is lost
-			lostVisibilityTick = -1 // Reset if we regain sight
-		} else {
-			if lostVisibilityTick == -1 { // First tick where visibility was lost
-				lostVisibilityTick = tick
-			}
-
-			if lastSeenTick != -1 { // If we had seen them before, break here
-				break
-			}
-		}
-
-		if playerTick.PlayerName == "shmeeny" {
-			c.logger.Debug("LOS check",
-				"tick", tick,
-				"player", playerTick.PlayerName,
-				"target", targetTick.PlayerName,
-				"isVisible", isVisible)
-		}
-	}
-
-	if firstSeenTick != -1 {
-		return firstSeenTick, true
-	}
-
-	return 0, false
-}*/
-
-/*func (c *Collector) findLastContinuousVisibilityStart(playerID, targetID uint64, currentTick int) (int, bool) {
-	const maxLookbackTicks = 128 // ~2 seconds at 64 tick
-
-	startTick := currentTick - maxLookbackTicks
-	if startTick < 0 {
-		startTick = 0
-	}
-
-	var firstSpottedTick = -1
-	var lastSeenTick = -1
-
-	for tick := currentTick; tick >= startTick; tick-- {
-		playerData, exists := c.perTickInfo[tick]
-		if !exists {
-			continue
-		}
-
-		playerTick, exists := playerData[playerID]
-		if !exists || !playerTick.IsAlive {
-			continue
-		}
-
-		targetTick, exists := playerData[targetID]
-		if !exists || !targetTick.IsAlive {
-			continue
-		}
-
-		isVisible := c.bspChecker.IsVisible(playerTick.Position, targetTick.Position)
-		if playerTick.PlayerName == "shmeeny" {
-			c.logger.Debug("LOS check",
-				"tick", tick,
-				"player", playerTick.PlayerName,
-				"target", targetTick.PlayerName,
-				"isVisible", isVisible)
-		}
-
-		if isVisible {
-			if firstSpottedTick == -1 {
-				firstSpottedTick = tick // Store first sighting within lookback range
-			}
-			lastSeenTick = tick
-		} else if lastSeenTick != -1 {
-			firstSpottedTick = lastSeenTick
-			break
-		}
-	}
-
-	if firstSpottedTick != -1 {
-		return firstSpottedTick, true
-	}
-
-	return 0, false
-}*/
-
-/*func (c *Collector) AnalyzeTimeToDamage() {
-	for tick, playerData := range c.perTickInfo {
-		for _, playerTick := range playerData {
-			// Dead players can't be damaged
-			if !playerTick.IsAlive {
-				continue
-			}
-
-			// Find the first tick where the player saw an enemy
-			if firstSightTick, exists := c.firstEnemySpottedTick(playerTick.SteamID, tick); exists {
-				timeToDamage := int64(tick-firstSightTick) * c.tickTime.Milliseconds()
-
-				if timeToDamage < 1000 { // Exclude trigger discipline cases (1s+)
-					fmt.Printf("Player %d fired after %d ms (tick %d → %d)\n", playerTick.SteamID, timeToDamage, firstSightTick, tick)
-				} else {
-					fmt.Printf("Excluded trigger discipline for player %d (Time: %d ms, tick %d → %d)\n", playerTick.SteamID, timeToDamage, firstSightTick, tick)
-				}
-			}
-		}
-	}
-}
-
-func (c *Collector) firstEnemySpottedTick(steamID uint64, currentTick int) (int, bool) {
-	for tick := currentTick; tick >= 0; tick-- {
-		playerData, exists := c.perTickInfo[tick]
-		if !exists {
-			continue
-		}
-
-		// Get the player's data for this tick
-		playerTick, exists := playerData[steamID]
-		if !exists || !playerTick.IsAlive {
-			continue
-		}
-
-		// Check visibility against all enemies at this tick
-		sawEnemy := false
-		for _, enemyTick := range playerData {
-			if enemyTick.PlayerTeam != playerTick.PlayerTeam && enemyTick.IsAlive {
-				if c.bspChecker.IsVisible(playerTick.Position, enemyTick.Position) {
-					sawEnemy = true
-					break
-				}
-			}
-		}
-
-		// Found the moment before first enemy sighting
-		if !sawEnemy && tick < currentTick {
-			return tick + 1, true
-		}
-	}
-	return 0, false
-}*/
