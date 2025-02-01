@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -160,7 +159,11 @@ func (c *Collector) Collect(demoPath string) (*models.Match, error) {
 		log.Fatalf("Failed to load BSP data for map %s: %v\n", c.match.MapName, err)
 	} else {
 		c.bspChecker = bspChecker
-		c.logger.Debug("Successfully loaded BSP data", "MapName", c.match.MapName)
+		if err := c.bspChecker.LoadPlayerModel(); err != nil {
+			return nil, fmt.Errorf("failed to load player model: %v", err)
+		}
+
+		c.logger.Debug("Successfully loaded BSP and Player Model data", "MapName", c.match.MapName)
 	}
 
 	c.logger.Debug("Resuming full parsing...")
@@ -194,18 +197,26 @@ func (c *Collector) registerEventHandlers() {
 
 func (c *Collector) determineCS2MapsPath() (string, error) {
 	paths := []string{
-		`C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive\game\csgo`,
-		`C:\Program Files\Steam\steamapps\common\Counter-Strike Global Offensive\game\csgo`,
+		// CS2 paths
+		filepath.Join(os.Getenv("ProgramFiles(x86)"), "Steam", "steamapps", "common", "Counter-Strike 2", "game", "csgo"),
+		filepath.Join(os.Getenv("ProgramFiles"), "Steam", "steamapps", "common", "Counter-Strike 2", "game", "csgo"),
+		// CSGO paths
+		filepath.Join(os.Getenv("ProgramFiles(x86)"), "Steam", "steamapps", "common", "Counter-Strike Global Offensive", "game", "csgo"),
+		filepath.Join(os.Getenv("ProgramFiles"), "Steam", "steamapps", "common", "Counter-Strike Global Offensive", "game", "csgo"),
+		// Custom Steam library path if set
+		filepath.Join(os.Getenv("STEAM_LIBRARY"), "steamapps", "common", "Counter-Strike 2", "game", "csgo"),
+		filepath.Join(os.Getenv("STEAM_LIBRARY"), "steamapps", "common", "Counter-Strike Global Offensive", "game", "csgo"),
 	}
 
 	for _, path := range paths {
-		if fileExists(filepath.Join(path, "maps")) {
+		mapsPath := filepath.Join(path, "maps")
+		if fileExists(mapsPath) {
+			c.logger.Debug("Found CS2/CSGO installation", "path", path)
 			return path, nil
 		}
 	}
 
-	return "", errors.New("path not found")
-
+	return "", fmt.Errorf("CS2/CSGO installation not found. Paths checked: %v", paths)
 }
 
 func (c *Collector) calculateVelocity3D(currentPos, lastPos r3.Vector) float64 {

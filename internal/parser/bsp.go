@@ -19,10 +19,11 @@ import (
 
 // BSPLoader handles loading BSP files from various sources
 type BSPLoader struct {
-	cs2Path  string
-	tempDir  string
-	mapsPath string
-	logger   slog.Logger
+	cs2Path    string
+	tempDir    string
+	mapsPath   string
+	modelsPath string
+	logger     slog.Logger
 }
 
 type Vector3 struct {
@@ -39,7 +40,7 @@ type BSPData struct {
 }
 
 type Header struct {
-	Ident       [4]byte // Should be "VBSP"
+	Ident       [4]byte // Should be "VBSP" for maps and "VMDL" for models
 	Version     int32
 	MapRevision int32
 	LumpCount   int32
@@ -87,6 +88,23 @@ type BSPVisibilityChecker struct {
 	logger         slog.Logger
 	materialData   map[int]string
 	materialCache  MaterialCache
+	playerModel    *PlayerModel
+	modelCache     map[string]*PlayerModel
+}
+
+type ModelHitbox struct {
+	Mins   Vector3
+	Maxs   Vector3
+	Group  int32
+	NameID int32
+}
+
+type PlayerModel struct {
+	Hitboxes        []ModelHitbox
+	StandingHeight  float64
+	CrouchingHeight float64
+	Width           float64
+	HitboxNames     map[int32]string
 }
 
 // Material penetration properties
@@ -150,10 +168,11 @@ const (
 // NewBSPLoader creates a new BSPLoader with the given CS2 installation path
 func NewBSPLoader(cs2Path string, logger slog.Logger) *BSPLoader {
 	return &BSPLoader{
-		cs2Path:  cs2Path,
-		mapsPath: filepath.Join(cs2Path, "maps"),
-		tempDir:  filepath.Join(os.TempDir(), "cs2coach_bsp"),
-		logger:   logger,
+		cs2Path:    cs2Path,
+		mapsPath:   filepath.Join(cs2Path, "maps"),
+		modelsPath: filepath.Join(cs2Path, "models"),
+		tempDir:    filepath.Join(os.TempDir(), "cs2coach_bsp"),
+		logger:     logger,
 	}
 }
 
@@ -190,6 +209,373 @@ func (b *BSPVisibilityChecker) LoadSource2MapFiles(mapDir string) error {
 	}
 
 	return nil
+}
+
+func (b *BSPVisibilityChecker) LoadPlayerModel() error {
+	if b.worldData == nil {
+		return fmt.Errorf("world data not loaded")
+	}
+
+	// First try to load from cache
+	if b.modelCache == nil {
+		b.modelCache = make(map[string]*PlayerModel)
+	}
+
+	const modelPath = "models/player/custom_player/legacy/ctm_sas.vmdl_c"
+	if cached, exists := b.modelCache[modelPath]; exists {
+		b.playerModel = cached
+		return nil
+	}
+
+	// The model file should be in the VPK files
+	modelData, err := b.loadModelFile(modelPath)
+	if err != nil {
+		return fmt.Errorf("failed to load player model data: %v", err)
+	}
+
+	model, err := b.parseModelData(modelData)
+	if err != nil {
+		return fmt.Errorf("failed to parse player model data: %v", err)
+	}
+
+	// Cache the model for future use
+	b.modelCache[modelPath] = model
+	b.playerModel = model
+
+	return nil
+}
+
+func (b *BSPVisibilityChecker) loadModelFile(modelPath string) ([]byte, error) {
+	b.logger.Warn("loadModelFile", "modelPath", modelPath)
+	vpkPath := "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Counter-Strike Global Offensive\\game\\csgo\\pak01_dir.vpk"
+
+	// Model paths to try (including both CT and T models)
+	modelPaths := []string{
+		"characters/models/ctm_fbi/ctm_fbi.vmdl_c",
+		"characters/models/tm_phoenix/tm_phoenix.vmdl_c",
+		modelPath, // The originally requested path
+	}
+
+	var lastErr error
+	pak, err := vpk.OpenAny(vpkPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open VPK: %w", err)
+	}
+	defer pak.Close()
+
+	b.logger.Warn("Searching VPK for player models", "vpkPath", vpkPath)
+
+	for _, path := range modelPaths {
+		// Convert to lowercase for case-insensitive comparison
+		searchPath := strings.ToLower(path)
+
+		// Search for the model file in VPK entries
+		var foundEntry vpk.Entry
+		for _, entry := range pak.Entries() {
+			if strings.HasSuffix(entry.Filename(), "vmdl_c") {
+				b.logger.Debug("Found vmdl_c file", "Path", entry.Path, "Filename", entry.Filename())
+			}
+
+			if strings.EqualFold(entry.Filename(), searchPath) {
+				foundEntry = entry
+				break
+			}
+		}
+
+		if foundEntry != nil {
+			b.logger.Warn("Found player model",
+				"path", foundEntry.Filename(),
+				"size", foundEntry.Length())
+
+			// Open and read the model file
+			reader, err := foundEntry.Open()
+			if err != nil {
+				return nil, fmt.Errorf("failed to open model file: %v", err)
+			}
+			defer reader.Close()
+
+			// Read the entire file
+			data, err := io.ReadAll(reader)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read model file: %v", err)
+			}
+
+			return data, nil
+		}
+	}
+
+	// If we couldn't find or load any model files, fall back to default values
+	b.logger.Warn("Failed to load model from VPK, using default values",
+		"error", lastErr,
+		"modelPath", modelPath)
+
+	// Default CS2 player model values
+	defaultHitboxes := []ModelHitbox{
+		// Head hitbox
+		{
+			Mins:   Vector3{X: -4, Y: -4, Z: 64},
+			Maxs:   Vector3{X: 4, Y: 4, Z: 72},
+			Group:  1,
+			NameID: 1,
+		},
+		// Body hitbox
+		{
+			Mins:   Vector3{X: -8, Y: -8, Z: 0},
+			Maxs:   Vector3{X: 8, Y: 8, Z: 64},
+			Group:  2,
+			NameID: 2,
+		},
+		// Arms hitboxes
+		{
+			Mins:   Vector3{X: -16, Y: -4, Z: 32},
+			Maxs:   Vector3{X: 16, Y: 4, Z: 64},
+			Group:  3,
+			NameID: 3,
+		},
+		// Legs hitboxes
+		{
+			Mins:   Vector3{X: -4, Y: -4, Z: 0},
+			Maxs:   Vector3{X: 4, Y: 4, Z: 32},
+			Group:  4,
+			NameID: 4,
+		},
+	}
+
+	var buf bytes.Buffer
+	binary.Write(&buf, binary.LittleEndian, int32(len(defaultHitboxes)))
+	for _, hb := range defaultHitboxes {
+		binary.Write(&buf, binary.LittleEndian, hb)
+	}
+
+	return buf.Bytes(), nil
+}
+
+func (b *BSPVisibilityChecker) parseModelData(data []byte) (*PlayerModel, error) {
+	reader := bytes.NewReader(data)
+
+	// Source 2 VMDL format starts with a size indicator
+	var dataSize int32
+	if err := binary.Read(reader, binary.LittleEndian, &dataSize); err != nil {
+		b.logger.Error("Failed to read data size", "error", err)
+		return b.createDefaultPlayerModel()
+	}
+
+	// Skip known header fields
+	reader.Seek(12, io.SeekStart) // Skip past 0x0c000100080000000f000000
+
+	// Read block count
+	var blockCount int32
+	if err := binary.Read(reader, binary.LittleEndian, &blockCount); err != nil {
+		b.logger.Warn("Failed to read block count", "error", err)
+		return b.createDefaultPlayerModel()
+	}
+
+	b.logger.Debug("VMDL Structure",
+		"dataSize", dataSize,
+		"blockCount", blockCount)
+
+	// Find hitbox data block
+	var foundHitboxes bool
+	for i := int32(0); i < blockCount; i++ {
+		var blockType int32
+		var blockSize int32
+
+		if err := binary.Read(reader, binary.LittleEndian, &blockType); err != nil {
+			continue
+		}
+		if err := binary.Read(reader, binary.LittleEndian, &blockSize); err != nil {
+			continue
+		}
+
+		// Validate block size
+		if blockSize <= 0 || blockSize > dataSize {
+			b.logger.Debug("Invalid block size", "size", blockSize, "maxSize", dataSize)
+			continue
+		}
+
+		blockStart, _ := reader.Seek(0, io.SeekCurrent)
+
+		b.logger.Debug("Found block",
+			"type", blockType,
+			"size", blockSize)
+
+		// Block types that may contain hitbox data
+		if blockType == 4 || blockType == 1213223501 || blockType == 1947342460 {
+			b.logger.Debug("Attempting to parse potential hitbox block", "type", blockType)
+			foundHitboxes = true
+			if hitboxes, err := b.parseHitboxBlock(reader, blockSize); err == nil {
+				b.logger.Debug("Successfully parsed hitbox block",
+					"hitboxCount", len(hitboxes.Hitboxes))
+				return hitboxes, nil
+			}
+		}
+
+		// Skip to next block
+		reader.Seek(blockStart+int64(blockSize), io.SeekStart)
+	}
+
+	if !foundHitboxes {
+		b.logger.Warn("No hitbox block found")
+		return b.createDefaultPlayerModel()
+	}
+
+	return b.createDefaultPlayerModel()
+}
+
+func (b *BSPVisibilityChecker) parseHitboxBlock(reader *bytes.Reader, blockSize int32) (*PlayerModel, error) {
+	startPos, _ := reader.Seek(0, io.SeekCurrent)
+	b.logger.Debug("parseHitboxBlock", "startPos", startPos)
+
+	// Read hitbox definition header
+	var hitboxSetCount int32
+	if err := binary.Read(reader, binary.LittleEndian, &hitboxSetCount); err != nil {
+		return nil, err
+	}
+
+	bytesRead := int32(4) // Account for hitboxSetCount
+
+	if hitboxSetCount <= 0 || hitboxSetCount > 64 {
+		return nil, fmt.Errorf("invalid hitbox set count: %d", hitboxSetCount)
+	}
+
+	model := &PlayerModel{
+		Hitboxes:        make([]ModelHitbox, 0),
+		StandingHeight:  72.0,
+		CrouchingHeight: 54.0,
+		Width:           32.0,
+		HitboxNames:     make(map[int32]string),
+	}
+
+	// Read each hitbox set
+	for setIdx := int32(0); setIdx < hitboxSetCount; setIdx++ {
+		var hitboxCount int32
+		if err := binary.Read(reader, binary.LittleEndian, &hitboxCount); err != nil {
+			return nil, err
+		}
+		bytesRead += 4
+
+		if bytesRead >= blockSize {
+			return nil, fmt.Errorf("block size exceeded while reading hitbox count")
+		}
+
+		if hitboxCount <= 0 || hitboxCount > 128 {
+			continue
+		}
+
+		b.logger.Debug("Reading hitbox set",
+			"setIndex", setIdx,
+			"hitboxCount", hitboxCount)
+
+		// Read hitboxes in this set
+		for i := int32(0); i < hitboxCount; i++ {
+			var hitbox ModelHitbox
+
+			// Read hitbox data
+			if bytesRead+28 > blockSize { // 28 = size of Mins(12) + Maxs(12) + Group(4)
+				return nil, fmt.Errorf("block size exceeded while reading hitbox data")
+			}
+
+			if err := binary.Read(reader, binary.LittleEndian, &hitbox.Mins); err != nil {
+				return nil, err
+			}
+			if err := binary.Read(reader, binary.LittleEndian, &hitbox.Maxs); err != nil {
+				return nil, err
+			}
+			if err := binary.Read(reader, binary.LittleEndian, &hitbox.Group); err != nil {
+				return nil, err
+			}
+			bytesRead += 28
+
+			if isValidHitbox(hitbox) {
+				hitbox.NameID = hitbox.Group
+				model.Hitboxes = append(model.Hitboxes, hitbox)
+				model.HitboxNames[hitbox.NameID] = getHitboxName(hitbox.Group)
+			}
+		}
+
+		// If we found valid hitboxes in this set, we can return
+		if len(model.Hitboxes) > 0 {
+			return model, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no valid hitboxes found in any set")
+}
+
+func isValidHitbox(hb ModelHitbox) bool {
+	// Basic sanity checks
+	if math.IsNaN(float64(hb.Mins.X)) || math.IsNaN(float64(hb.Mins.Y)) || math.IsNaN(float64(hb.Mins.Z)) ||
+		math.IsNaN(float64(hb.Maxs.X)) || math.IsNaN(float64(hb.Maxs.Y)) || math.IsNaN(float64(hb.Maxs.Z)) {
+		return false
+	}
+
+	// Check for reasonable bounds
+	const maxSize float32 = 100.0
+	if math.Abs(float64(hb.Mins.X)) > float64(maxSize) || math.Abs(float64(hb.Mins.Y)) > float64(maxSize) || math.Abs(float64(hb.Mins.Z)) > float64(maxSize) ||
+		math.Abs(float64(hb.Maxs.X)) > float64(maxSize) || math.Abs(float64(hb.Maxs.Y)) > float64(maxSize) || math.Abs(float64(hb.Maxs.Z)) > float64(maxSize) {
+		return false
+	}
+
+	return true
+}
+
+func getHitboxName(group int32) string {
+	switch group {
+	case 1:
+		return "head"
+	case 2:
+		return "body"
+	case 3:
+		return "arms"
+	case 4:
+		return "legs"
+	default:
+		return fmt.Sprintf("hitbox_%d", group)
+	}
+}
+
+func (b *BSPVisibilityChecker) createDefaultPlayerModel() (*PlayerModel, error) {
+	defaultHitboxes := []ModelHitbox{
+		{
+			Mins:   Vector3{X: -4, Y: -4, Z: 64},
+			Maxs:   Vector3{X: 4, Y: 4, Z: 72},
+			Group:  1,
+			NameID: 1,
+		},
+		{
+			Mins:   Vector3{X: -8, Y: -8, Z: 0},
+			Maxs:   Vector3{X: 8, Y: 8, Z: 64},
+			Group:  2,
+			NameID: 2,
+		},
+		{
+			Mins:   Vector3{X: -16, Y: -4, Z: 32},
+			Maxs:   Vector3{X: 16, Y: 4, Z: 64},
+			Group:  3,
+			NameID: 3,
+		},
+		{
+			Mins:   Vector3{X: -4, Y: -4, Z: 0},
+			Maxs:   Vector3{X: 4, Y: 4, Z: 32},
+			Group:  4,
+			NameID: 4,
+		},
+	}
+
+	model := &PlayerModel{
+		Hitboxes:        defaultHitboxes,
+		StandingHeight:  72.0,
+		CrouchingHeight: 54.0,
+		Width:           32.0,
+		HitboxNames: map[int32]string{
+			1: "head",
+			2: "body",
+			3: "arms",
+			4: "legs",
+		},
+	}
+
+	return model, nil
 }
 
 func (b *BSPVisibilityChecker) LoadVVISData(vvisPath string) error {
@@ -554,6 +940,7 @@ func extractBSPFromVPK(vpkPath, mapName, outputDir string) error {
 func (b *BSPVisibilityChecker) IsVisible(player PlayerTickData, targetPlayer PlayerTickData) bool {
 	from := player.Position
 	to := targetPlayer.Position
+
 	playerForward := player.ForwardVector()
 	direction := to.Sub(from)
 	distance := direction.Norm()
@@ -567,63 +954,35 @@ func (b *BSPVisibilityChecker) IsVisible(player PlayerTickData, targetPlayer Pla
 	// FOV checks
 	horizontalDot := r3.Vector{X: directionToTarget.X, Y: directionToTarget.Y, Z: 0}.Normalize().
 		Dot(r3.Vector{X: playerViewDirection.X, Y: playerViewDirection.Y, Z: 0}.Normalize())
-	horizontalFOVThreshold := math.Cos(45 * (math.Pi / 180))
+	horizontalFOVThreshold := math.Cos(90 * (math.Pi / 180))
 
 	verticalDot := math.Abs(directionToTarget.Z)
-	verticalFOVThreshold := math.Sin(27 * (math.Pi / 180))
+	verticalFOVThreshold := math.Sin(74 * (math.Pi / 180))
 
 	if horizontalDot < horizontalFOVThreshold || verticalDot > verticalFOVThreshold {
 		return false
 	}
 
-	if b.bspData == nil {
+	if b.bspData == nil || b.playerModel == nil {
 		return false
 	}
 
-	// Model dimensions
-	var modelHeight float64
+	// Get the appropriate hitboxes based on stance
+	var hitboxesToCheck []ModelHitbox
 	if targetPlayer.IsCrouched {
-		modelHeight = 54
+		hitboxesToCheck = b.getAdjustedHitboxes(b.playerModel.Hitboxes, true)
 	} else {
-		modelHeight = 72
+		hitboxesToCheck = b.playerModel.Hitboxes
 	}
-
-	halfHeight := modelHeight / 2
-	modelWidth := float64(32)
 
 	// Calculate elevation difference between players
 	elevationDiff := to.Z - from.Z
 	heightAdjustment := 0.0
-	if math.Abs(elevationDiff) > modelHeight {
-		// Adjust ray angles for significant height differences
+	if math.Abs(elevationDiff) > b.playerModel.StandingHeight {
 		heightAdjustment = math.Atan2(elevationDiff, math.Sqrt(direction.X*direction.X+direction.Y*direction.Y))
 	}
 
-	// Primary model check points with elevation-aware positioning
-	mainOffsets := []r3.Vector{
-		{X: 0, Y: 0, Z: 0},                                      // Center mass
-		{X: 0, Y: 0, Z: float64(halfHeight)},                    // Head level
-		{X: 0, Y: 0, Z: -float64(halfHeight)},                   // Feet level
-		{X: modelWidth / 2, Y: 0, Z: 0},                         // Right side
-		{X: -modelWidth / 2, Y: 0, Z: 0},                        // Left side
-		{X: 0, Y: modelWidth / 2, Z: 0},                         // Front
-		{X: 0, Y: -modelWidth / 2, Z: 0},                        // Back
-		{X: modelWidth / 2, Y: 0, Z: float64(halfHeight / 2)},   // Upper right
-		{X: -modelWidth / 2, Y: 0, Z: float64(halfHeight / 2)},  // Upper left
-		{X: modelWidth / 2, Y: 0, Z: -float64(halfHeight / 2)},  // Lower right
-		{X: -modelWidth / 2, Y: 0, Z: -float64(halfHeight / 2)}, // Lower left
-	}
-
-	// Additional check points for elevation differences
-	if math.Abs(elevationDiff) > modelHeight/2 {
-		// Add more points along vertical axis for better elevation coverage
-		elevationOffsets := []float64{-modelHeight / 3, -modelHeight / 6, modelHeight / 6, modelHeight / 3}
-		for _, offset := range elevationOffsets {
-			mainOffsets = append(mainOffsets, r3.Vector{X: 0, Y: 0, Z: offset})
-		}
-	}
-
-	// Additional ray spread angles for narrow passages
+	// Ray spread angles for narrow passages
 	spreadAngles := []float64{-5, 0, 5} // degrees
 	start := Vector3{float32(from.X), float32(from.Y), float32(from.Z)}
 
@@ -631,44 +990,106 @@ func (b *BSPVisibilityChecker) IsVisible(player PlayerTickData, targetPlayer Pla
 	up := right.Cross(playerForward).Normalize()
 
 	// Adjust base angles for elevation
-	baseVerticalSpread := []float64{-5 + heightAdjustment*180/math.Pi,
+	baseVerticalSpread := []float64{
+		-5 + heightAdjustment*180/math.Pi,
 		heightAdjustment * 180 / math.Pi,
-		5 + heightAdjustment*180/math.Pi}
+		5 + heightAdjustment*180/math.Pi,
+	}
 
-	for _, offset := range mainOffsets {
-		targetPoint := to.Add(offset)
-		baseDirection := targetPoint.Sub(from)
+	// Check visibility for each hitbox point with ray spreading
+	for _, hitbox := range hitboxesToCheck {
+		checkPoints := b.generateHitboxCheckPoints(hitbox, to)
 
-		for _, horizontalSpread := range spreadAngles {
-			for _, verticalSpread := range baseVerticalSpread {
-				spreadRad := horizontalSpread * (math.Pi / 180)
-				verticalRad := verticalSpread * (math.Pi / 180)
+		for _, point := range checkPoints {
+			// Base direction to this hitbox point
+			baseDirection := point.Sub(from)
 
-				rotatedDir := baseDirection
-				rotatedDir = rotateVector(rotatedDir, right, verticalRad)
-				rotatedDir = rotateVector(rotatedDir, up, spreadRad)
+			for _, horizontalSpread := range spreadAngles {
+				for _, verticalSpread := range baseVerticalSpread {
+					spreadRad := horizontalSpread * (math.Pi / 180)
+					verticalRad := verticalSpread * (math.Pi / 180)
 
-				// Add intermediate points for long distances with elevation
-				if distance > 500 && math.Abs(elevationDiff) > modelHeight {
-					midPoint := from.Add(rotatedDir.Mul(0.5))
-					midEnd := Vector3{float32(midPoint.X), float32(midPoint.Y), float32(midPoint.Z)}
-					if blocked, _ := b.bspData.hasVisualBlocker(start, midEnd, b); !blocked {
-						continue
+					rotatedDir := baseDirection
+					rotatedDir = rotateVector(rotatedDir, right, verticalRad)
+					rotatedDir = rotateVector(rotatedDir, up, spreadRad)
+
+					// Add intermediate points for long distances with elevation
+					if distance > 500 && math.Abs(elevationDiff) > b.playerModel.StandingHeight {
+						midPoint := from.Add(rotatedDir.Mul(0.5))
+						midEnd := Vector3{float32(midPoint.X), float32(midPoint.Y), float32(midPoint.Z)}
+						if blocked, _ := b.bspData.hasVisualBlocker(start, midEnd, b); !blocked {
+							continue
+						}
 					}
-				}
 
-				spreadTarget := from.Add(rotatedDir)
-				end := Vector3{float32(spreadTarget.X), float32(spreadTarget.Y), float32(spreadTarget.Z)}
+					spreadTarget := from.Add(rotatedDir)
+					end := Vector3{float32(spreadTarget.X), float32(spreadTarget.Y), float32(spreadTarget.Z)}
 
-				blocked, penetration := b.bspData.hasVisualBlocker(start, end, b)
-				if !blocked || penetration > 0.3 { // Allow visibility through high-penetration materials
-					return true
+					blocked, penetration := b.bspData.hasVisualBlocker(start, end, b)
+					if !blocked || penetration > 0.3 {
+						return true
+					}
 				}
 			}
 		}
 	}
 
 	return false
+}
+
+func (b *BSPVisibilityChecker) getAdjustedHitboxes(hitboxes []ModelHitbox, crouching bool) []ModelHitbox {
+	adjusted := make([]ModelHitbox, len(hitboxes))
+	copy(adjusted, hitboxes)
+
+	if crouching {
+		crouchScale := b.playerModel.CrouchingHeight / b.playerModel.StandingHeight
+		for i := range adjusted {
+			// Scale vertical positions for crouching
+			adjusted[i].Mins.Z *= float32(crouchScale)
+			adjusted[i].Maxs.Z *= float32(crouchScale)
+		}
+	}
+
+	return adjusted
+}
+
+func (b *BSPVisibilityChecker) generateHitboxCheckPoints(hitbox ModelHitbox, basePos r3.Vector) []r3.Vector {
+	// Generate key points to check for visibility
+	points := []r3.Vector{
+		// Center
+		{
+			X: basePos.X + float64((hitbox.Mins.X+hitbox.Maxs.X)/2),
+			Y: basePos.Y + float64((hitbox.Mins.Y+hitbox.Maxs.Y)/2),
+			Z: basePos.Z + float64((hitbox.Mins.Z+hitbox.Maxs.Z)/2),
+		},
+		// Top center
+		{
+			X: basePos.X + float64((hitbox.Mins.X+hitbox.Maxs.X)/2),
+			Y: basePos.Y + float64((hitbox.Mins.Y+hitbox.Maxs.Y)/2),
+			Z: basePos.Z + float64(hitbox.Maxs.Z),
+		},
+		// Bottom center
+		{
+			X: basePos.X + float64((hitbox.Mins.X+hitbox.Maxs.X)/2),
+			Y: basePos.Y + float64((hitbox.Mins.Y+hitbox.Maxs.Y)/2),
+			Z: basePos.Z + float64(hitbox.Mins.Z),
+		},
+	}
+
+	// Add corner points for more precise checking
+	corners := []r3.Vector{
+		{X: basePos.X + float64(hitbox.Mins.X), Y: basePos.Y + float64(hitbox.Mins.Y), Z: basePos.Z + float64(hitbox.Mins.Z)},
+		{X: basePos.X + float64(hitbox.Maxs.X), Y: basePos.Y + float64(hitbox.Mins.Y), Z: basePos.Z + float64(hitbox.Mins.Z)},
+		{X: basePos.X + float64(hitbox.Mins.X), Y: basePos.Y + float64(hitbox.Maxs.Y), Z: basePos.Z + float64(hitbox.Mins.Z)},
+		{X: basePos.X + float64(hitbox.Maxs.X), Y: basePos.Y + float64(hitbox.Maxs.Y), Z: basePos.Z + float64(hitbox.Mins.Z)},
+		{X: basePos.X + float64(hitbox.Mins.X), Y: basePos.Y + float64(hitbox.Mins.Y), Z: basePos.Z + float64(hitbox.Maxs.Z)},
+		{X: basePos.X + float64(hitbox.Maxs.X), Y: basePos.Y + float64(hitbox.Mins.Y), Z: basePos.Z + float64(hitbox.Maxs.Z)},
+		{X: basePos.X + float64(hitbox.Mins.X), Y: basePos.Y + float64(hitbox.Maxs.Y), Z: basePos.Z + float64(hitbox.Maxs.Z)},
+		{X: basePos.X + float64(hitbox.Maxs.X), Y: basePos.Y + float64(hitbox.Maxs.Y), Z: basePos.Z + float64(hitbox.Maxs.Z)},
+	}
+
+	points = append(points, corners...)
+	return points
 }
 
 func rotateVector(v, axis r3.Vector, angle float64) r3.Vector {
