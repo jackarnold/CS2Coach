@@ -505,6 +505,136 @@ func extractBSPFromVPK(vpkPath, mapName, outputDir string) error {
 	return nil
 }
 
+func (b *BSPVisibilityChecker) IsVisible(player PlayerTickData, targetPlayer PlayerTickData) bool {
+	from := player.Position
+	to := targetPlayer.Position
+	playerForward := player.ForwardVector()
+	direction := to.Sub(from)
+	distance := direction.Norm()
+	if distance > 2000 {
+		return false
+	}
+
+	directionToTarget := direction.Normalize()
+	playerViewDirection := playerForward.Normalize()
+
+	// FOV checks
+	horizontalDot := r3.Vector{X: directionToTarget.X, Y: directionToTarget.Y, Z: 0}.Normalize().
+		Dot(r3.Vector{X: playerViewDirection.X, Y: playerViewDirection.Y, Z: 0}.Normalize())
+	horizontalFOVThreshold := math.Cos(45 * (math.Pi / 180))
+
+	verticalDot := math.Abs(directionToTarget.Z)
+	verticalFOVThreshold := math.Sin(27 * (math.Pi / 180))
+
+	if horizontalDot < horizontalFOVThreshold || verticalDot > verticalFOVThreshold {
+		return false
+	}
+
+	if b.bspData == nil {
+		return false
+	}
+
+	// Model dimensions
+	var modelHeight float64
+	if targetPlayer.IsCrouched {
+		modelHeight = 54
+	} else {
+		modelHeight = 72
+	}
+
+	halfHeight := modelHeight / 2
+	modelWidth := float64(32)
+
+	// Calculate elevation difference between players
+	elevationDiff := to.Z - from.Z
+	heightAdjustment := 0.0
+	if math.Abs(elevationDiff) > modelHeight {
+		// Adjust ray angles for significant height differences
+		heightAdjustment = math.Atan2(elevationDiff, math.Sqrt(direction.X*direction.X+direction.Y*direction.Y))
+	}
+
+	// Primary model check points with elevation-aware positioning
+	mainOffsets := []r3.Vector{
+		{X: 0, Y: 0, Z: 0},                                      // Center mass
+		{X: 0, Y: 0, Z: float64(halfHeight)},                    // Head level
+		{X: 0, Y: 0, Z: -float64(halfHeight)},                   // Feet level
+		{X: modelWidth / 2, Y: 0, Z: 0},                         // Right side
+		{X: -modelWidth / 2, Y: 0, Z: 0},                        // Left side
+		{X: 0, Y: modelWidth / 2, Z: 0},                         // Front
+		{X: 0, Y: -modelWidth / 2, Z: 0},                        // Back
+		{X: modelWidth / 2, Y: 0, Z: float64(halfHeight / 2)},   // Upper right
+		{X: -modelWidth / 2, Y: 0, Z: float64(halfHeight / 2)},  // Upper left
+		{X: modelWidth / 2, Y: 0, Z: -float64(halfHeight / 2)},  // Lower right
+		{X: -modelWidth / 2, Y: 0, Z: -float64(halfHeight / 2)}, // Lower left
+	}
+
+	// Additional check points for elevation differences
+	if math.Abs(elevationDiff) > modelHeight/2 {
+		// Add more points along vertical axis for better elevation coverage
+		elevationOffsets := []float64{-modelHeight / 3, -modelHeight / 6, modelHeight / 6, modelHeight / 3}
+		for _, offset := range elevationOffsets {
+			mainOffsets = append(mainOffsets, r3.Vector{X: 0, Y: 0, Z: offset})
+		}
+	}
+
+	// Additional ray spread angles for narrow passages
+	spreadAngles := []float64{-5, 0, 5} // degrees
+	start := Vector3{float32(from.X), float32(from.Y), float32(from.Z)}
+
+	right := playerForward.Cross(r3.Vector{X: 0, Y: 0, Z: 1}).Normalize()
+	up := right.Cross(playerForward).Normalize()
+
+	// Adjust base angles for elevation
+	baseVerticalSpread := []float64{-5 + heightAdjustment*180/math.Pi,
+		heightAdjustment * 180 / math.Pi,
+		5 + heightAdjustment*180/math.Pi}
+
+	for _, offset := range mainOffsets {
+		targetPoint := to.Add(offset)
+		baseDirection := targetPoint.Sub(from)
+
+		for _, horizontalSpread := range spreadAngles {
+			for _, verticalSpread := range baseVerticalSpread {
+				spreadRad := horizontalSpread * (math.Pi / 180)
+				verticalRad := verticalSpread * (math.Pi / 180)
+
+				rotatedDir := baseDirection
+				rotatedDir = rotateVector(rotatedDir, right, verticalRad)
+				rotatedDir = rotateVector(rotatedDir, up, spreadRad)
+
+				// Add intermediate points for long distances with elevation
+				if distance > 500 && math.Abs(elevationDiff) > modelHeight {
+					midPoint := from.Add(rotatedDir.Mul(0.5))
+					midEnd := Vector3{float32(midPoint.X), float32(midPoint.Y), float32(midPoint.Z)}
+					if !b.bspData.hasVisualBlocker(start, midEnd) {
+						continue
+					}
+				}
+
+				spreadTarget := from.Add(rotatedDir)
+				end := Vector3{float32(spreadTarget.X), float32(spreadTarget.Y), float32(spreadTarget.Z)}
+
+				if !b.bspData.hasVisualBlocker(start, end) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+func rotateVector(v, axis r3.Vector, angle float64) r3.Vector {
+	cos := math.Cos(angle)
+	sin := math.Sin(angle)
+
+	// Rodrigues rotation formula
+	return v.Mul(cos).Add(
+		axis.Cross(v).Mul(sin)).Add(
+		axis.Mul(axis.Dot(v) * (1 - cos)))
+}
+
+// First old
 // IsVisible determines if there's a clear line of sight between two points
 /*func (b *BSPVisibilityChecker) IsVisible(from, to r3.Vector) bool {
 	// Simple distance check first
@@ -526,49 +656,49 @@ func extractBSPFromVPK(vpkPath, mapName, outputDir string) error {
 	// Check main visibility line
 	return !b.bspData.hasVisualBlocker(start, end)
 }*/
-
-func (b *BSPVisibilityChecker) IsVisible(from, to, playerForward r3.Vector) bool {
-	// Simple distance check first
-	direction := to.Sub(from)
-	distance := direction.Norm()
-	if distance > 2000 {
-		return false
-	}
-
-	// Normalize vectors
-	directionToTarget := direction.Normalize()
-	playerViewDirection := playerForward.Normalize()
-
-	// Calculate the dot product
-	dot := directionToTarget.Dot(playerViewDirection)
-
-	// Convert FOV threshold to radians (e.g., 90 degrees)
-	// 20 Degrees seems to capture more events but TTD is still a bit lower than it should be
-	// 25 Degrees captures less events but TTD is still a bit lower than it should be
-	fovThreshold := math.Cos(20 * (math.Pi / 180)) // 20 degrees in radians
-
-	if dot < fovThreshold {
-		return false // Target is outside of player's FOV
-	}
-
-	// Early out if BSP data isn't loaded
-	if b.bspData == nil {
-		return false
-	}
-
-	// Convert to local coords
-	start := Vector3{float32(from.X), float32(from.Y), float32(from.Z)}
-	end := Vector3{float32(to.X), float32(to.Y), float32(to.Z)}
-
-	/*b.logger.Debug("IsVisible Function -- Visibility check",
-	"player", from,
-	"target", to,
-	"distance", distance,
-	"result", !b.bspData.hasVisualBlocker(start, end))*/
-
-	// Check main visibility line
-	return !b.bspData.hasVisualBlocker(start, end)
+// Second old
+/*func (b *BSPVisibilityChecker) IsVisible(from, to, playerForward r3.Vector) bool {
+// Simple distance check first
+direction := to.Sub(from)
+distance := direction.Norm()
+if distance > 2000 {
+	return false
 }
+
+// Normalize vectors
+directionToTarget := direction.Normalize()
+playerViewDirection := playerForward.Normalize()
+
+// Calculate the dot product
+dot := directionToTarget.Dot(playerViewDirection)
+
+// Convert FOV threshold to radians (e.g., 90 degrees)
+// 20 Degrees seems to capture more events but TTD is still a bit lower than it should be
+// 25 Degrees captures less events but TTD is still a bit lower than it should be
+fovThreshold := math.Cos(20 * (math.Pi / 180)) // 20 degrees in radians
+
+if dot < fovThreshold {
+	return false // Target is outside of player's FOV
+}
+
+// Early out if BSP data isn't loaded
+if b.bspData == nil {
+	return false
+}
+
+// Convert to local coords
+start := Vector3{float32(from.X), float32(from.Y), float32(from.Z)}
+end := Vector3{float32(to.X), float32(to.Y), float32(to.Z)}
+
+/*b.logger.Debug("IsVisible Function -- Visibility check",
+"player", from,
+"target", to,
+"distance", distance,
+"result", !b.bspData.hasVisualBlocker(start, end))*/
+
+// Check main visibility line
+/*	return !b.bspData.hasVisualBlocker(start, end)
+}*/
 
 // hasVisualBlocker checks if there are any solid nodes between two points
 func (bsp *BSPData) hasVisualBlocker(start, end Vector3) bool {

@@ -448,7 +448,7 @@ func (c *Collector) findLastContinuousVisibilityStart(playerID, targetID uint64,
 	lastSeenTick := -1
 	lostVisibilityTick := -1
 
-	for tick := currentTick; tick >= 0; tick-- { // Instead of stopping at `maxLookbackTicks`, iterate back to 0
+	for tick := currentTick; tick >= 0; tick-- {
 		playerData, exists := c.perTickInfo[tick]
 		if !exists {
 			continue
@@ -470,7 +470,7 @@ func (c *Collector) findLastContinuousVisibilityStart(playerID, targetID uint64,
 		}
 		// END EVIL TESTING HACK -- REMOVE ME
 
-		isVisible := c.bspChecker.IsVisible(playerTick.Position, targetTick.Position, playerTick.ForwardVector())
+		isVisible := c.bspChecker.IsVisible(playerTick, targetTick)
 
 		/*c.logger.Debug("findLastContinuousVisibilityStart -- Visibility check",
 			"tick", tick,
