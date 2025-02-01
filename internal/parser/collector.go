@@ -8,12 +8,12 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/golang/geo/r3"
 	dem "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs"
 	common "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/common"
+	"github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/events"
 	"github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/msgs2"
 	"github.com/richardkiene/CS2Coach/internal/models"
 )
@@ -29,16 +29,69 @@ type Collector struct {
 	perTickInfo  map[int]map[uint64]PlayerTickData
 }
 
+type DamageDealt struct {
+	ArmorDamage  int
+	HealthDamage int
+	HitGroup     byte
+}
+
 type PlayerTickData struct {
-	SteamID    uint64
-	PlayerName string
-	PlayerTeam common.Team
-	Position   r3.Vector
-	ViewAngleX float32
-	ViewAngleY float32
-	IsAlive    bool
-	Velocity2D float64
-	Velocity3D float64
+	SteamID                uint64
+	PlayerName             string
+	PlayerTeam             common.Team
+	Position               r3.Vector
+	ViewAngleX             float32
+	ViewAngleY             float32
+	IsAlive                bool
+	Velocity2D             float64
+	Velocity3D             float64
+	ActiveWeapon           *common.Equipment
+	AmmoLeft               [32]int
+	EntityID               int
+	FlashedAtTick          int
+	FlashedTimeRemaining   time.Duration
+	Team                   common.Team
+	IsAirborne             bool
+	IsBlinded              bool
+	IsCrouched             bool
+	IsConnected            bool
+	IsBot                  bool
+	IsDefusing             bool
+	IsPlanting             bool
+	IsReloading            bool
+	IsScoped               bool
+	IsUpright              bool
+	IsWalking              bool
+	HasHelmet              bool
+	HasKit                 bool
+	FiredActiveWeapon      bool
+	ArmorRemaining         int
+	Assists                int
+	Deaths                 int
+	Kills                  int
+	Health                 int
+	Armor                  int
+	Damage                 int
+	UtilityDamage          int
+	Money                  int
+	CurrentRoundMoneySpent int
+	CurrentMoneySpentTotal int
+	DamageDealtToPlayer    map[uint64]DamageDealt
+}
+
+func (p *PlayerTickData) ForwardVector() r3.Vector {
+	// Convert degrees to radians
+	yaw := float64(p.ViewAngleX) * (math.Pi / 180)
+	pitch := float64(p.ViewAngleY) * (math.Pi / 180)
+
+	// Compute the forward vector components
+	forward := r3.Vector{
+		X: math.Cos(pitch) * math.Cos(yaw),
+		Y: math.Cos(pitch) * math.Sin(yaw),
+		Z: -math.Sin(pitch), // Negative because up is usually negative in CS2
+	}
+
+	return forward.Normalize() // Ensure it's a unit vector
 }
 
 func (p PlayerTickData) String() string {
@@ -58,26 +111,6 @@ func (p PlayerTickData) String() string {
 		p.ViewAngleX, p.ViewAngleY, p.IsAlive,
 		p.Velocity2D, p.Velocity3D,
 	)
-}
-
-type TickData struct {
-	Tick    int
-	Players []PlayerTickData
-}
-
-func (t TickData) String() string {
-	var playerStrings []string
-	for _, player := range t.Players {
-		playerStrings = append(playerStrings, player.String())
-	}
-	return fmt.Sprintf("TickData{Tick: %d, Players: [%s]}", t.Tick, strings.Join(playerStrings, ", "))
-}
-
-func NewTickData(tick int) *TickData {
-	return &TickData{
-		Tick:    tick,
-		Players: make([]PlayerTickData, 10),
-	}
 }
 
 func NewCollector(logger *slog.Logger) *Collector {
@@ -155,7 +188,8 @@ func (c *Collector) Collect(demoPath string) (*models.Match, error) {
 func (c *Collector) registerEventHandlers() {
 	c.parser.RegisterNetMessageHandler(c.handleServerInfo)
 	c.parser.RegisterNetMessageHandler(c.handleEntityUpdate)
-
+	c.parser.RegisterEventHandler(c.handleWeaponFire)
+	c.parser.RegisterEventHandler(c.handlePlayerHurt)
 }
 
 func (c *Collector) determineCS2MapsPath() (string, error) {
@@ -175,7 +209,7 @@ func (c *Collector) determineCS2MapsPath() (string, error) {
 }
 
 func (c *Collector) calculateVelocity3D(currentPos, lastPos r3.Vector) float64 {
-	timeDelta := c.tickTime.Seconds()
+	timeDelta := float64(c.tickTime.Milliseconds())
 
 	displacement := currentPos.Sub(lastPos)
 	return math.Sqrt(displacement.X*displacement.X+
@@ -184,7 +218,7 @@ func (c *Collector) calculateVelocity3D(currentPos, lastPos r3.Vector) float64 {
 }
 
 func (c *Collector) calculateVelocity2D(currentPos, lastPos r3.Vector) float64 {
-	timeDelta := c.tickTime.Seconds()
+	timeDelta := float64(c.tickTime.Milliseconds())
 
 	displacement := currentPos.Sub(lastPos)
 	return math.Sqrt(displacement.X*displacement.X+
@@ -214,6 +248,7 @@ func (c *Collector) handleEntityUpdate(msg *msgs2.CSVCMsg_PacketEntities) {
 	if c.bspChecker == nil {
 		return
 	}
+
 	gs := c.parser.GameState()
 	currentTick := gs.IngameTick()
 
@@ -222,75 +257,434 @@ func (c *Collector) handleEntityUpdate(msg *msgs2.CSVCMsg_PacketEntities) {
 		return
 	}
 
+	if c.perTickInfo[currentTick] == nil {
+		c.perTickInfo[currentTick] = make(map[uint64]PlayerTickData)
+	}
+
+	prevTick := currentTick - 1
+	var previousTickMap map[uint64]PlayerTickData
+	if prevTick >= 0 {
+		previousTickMap = c.perTickInfo[prevTick]
+	}
+
 	for _, player := range gs.Participants().Playing() {
 		if player.SteamID64 == 0 {
 			continue
 		}
 
-		if _, exists := c.perTickInfo[currentTick][player.SteamID64]; !exists {
-			c.perTickInfo[currentTick] = make(map[uint64]PlayerTickData)
-		}
-
 		var lastPlayerTick PlayerTickData
-		if value, exists := c.perTickInfo[currentTick-1][player.SteamID64]; exists {
-			lastPlayerTick = value
+		if previousTickMap != nil {
+			if ptd, ok := previousTickMap[player.SteamID64]; ok {
+				lastPlayerTick = ptd
+			}
 		}
 
-		isAlive := player.IsAlive()
-		velocity2D := float64(0)
-		velocity3D := float64(0)
+		var velocity2D, velocity3D float64
 
-		if isAlive {
+		// We only want to calculate the velocity of a player if they are alive
+		if player.IsAlive() {
 			velocity2D = c.calculateVelocity2D(player.Position(), lastPlayerTick.Position)
 			velocity3D = c.calculateVelocity3D(player.Position(), lastPlayerTick.Position)
 		}
 
-		playerTick := PlayerTickData{
-			SteamID:    player.SteamID64,
-			PlayerTeam: player.Team,
-			PlayerName: player.Name,
-			Position:   player.Position(),
-			ViewAngleX: player.ViewDirectionX(),
-			ViewAngleY: player.ViewDirectionY(),
-			IsAlive:    isAlive,
-			Velocity2D: velocity2D,
-			Velocity3D: velocity3D,
+		playerTick, found := c.perTickInfo[currentTick][player.SteamID64]
+		if !found {
+			// Only create a new struct if this is the first time we see this player on this tick
+			playerTick = PlayerTickData{
+				SteamID:             player.SteamID64,
+				DamageDealtToPlayer: make(map[uint64]DamageDealt),
+			}
 		}
 
-		// This is fairly verbose, adjust as necessary
-		if currentTick%10000 == 0 {
-			c.logger.Debug("Adding playerTick", "currentTick", currentTick, "playerTick", playerTick)
-		}
+		playerTick.SteamID = player.SteamID64
+		playerTick.PlayerTeam = player.Team
+		playerTick.PlayerName = player.Name
+		playerTick.Position = player.Position()
+		playerTick.ViewAngleX = player.ViewDirectionX()
+		playerTick.ViewAngleY = player.ViewDirectionY()
+		playerTick.IsAlive = player.IsAlive()
+		playerTick.Velocity2D = velocity2D
+		playerTick.Velocity3D = velocity3D
+		playerTick.ActiveWeapon = player.ActiveWeapon()
+		playerTick.AmmoLeft = player.AmmoLeft
+		playerTick.EntityID = player.Entity.ID()
+		playerTick.FlashedAtTick = player.FlashTick
+		playerTick.FlashedTimeRemaining = player.FlashDurationTimeRemaining()
+		playerTick.Team = player.Team
+		playerTick.IsConnected = player.IsConnected
+		playerTick.IsAirborne = player.IsAirborne()
+		playerTick.IsBlinded = player.IsBlinded()
+		playerTick.IsBot = player.IsBot
+		playerTick.IsCrouched = player.IsDucking()
+		playerTick.IsDefusing = player.IsDefusing
+		playerTick.IsPlanting = player.IsPlanting
+		playerTick.IsReloading = player.IsReloading
+		playerTick.IsScoped = player.IsScoped()
+		playerTick.IsUpright = player.IsStanding()
+		playerTick.IsWalking = player.IsWalking()
+		playerTick.Assists = player.Assists()
+		playerTick.Deaths = player.Deaths()
+		playerTick.Kills = player.Kills()
+		playerTick.Damage = player.TotalDamage()
+		playerTick.Health = player.Health()
+		playerTick.Armor = player.Armor()
+		playerTick.UtilityDamage = player.UtilityDamage()
+		playerTick.Money = player.Money()
+		playerTick.CurrentRoundMoneySpent = player.MoneySpentThisRound()
+		playerTick.CurrentMoneySpentTotal = player.MoneySpentTotal()
 
 		c.perTickInfo[currentTick][player.SteamID64] = playerTick
 	}
 }
 
-func (c *Collector) analyzeTimeToDamage() {
+func (c *Collector) handleWeaponFire(e events.WeaponFire) {
+	if e.Shooter == nil {
+		return
+	}
+
+	currentTick := c.parser.GameState().IngameTick()
+
+	if _, exists := c.perTickInfo[currentTick][e.Shooter.SteamID64]; !exists {
+		c.perTickInfo[currentTick] = make(map[uint64]PlayerTickData)
+	}
+
+	shooterData := c.perTickInfo[currentTick][e.Shooter.SteamID64]
+	shooterData.FiredActiveWeapon = true
+	c.perTickInfo[currentTick][e.Shooter.SteamID64] = shooterData
+}
+
+func (c *Collector) handlePlayerHurt(e events.PlayerHurt) {
+	gs := c.parser.GameState()
+	currentTick := gs.IngameTick()
+
+	if e.Attacker == nil || e.Player == nil {
+		return
+	}
+
+	attackerID := e.Attacker.SteamID64
+	victimID := e.Player.SteamID64
+
+	if _, exists := c.perTickInfo[currentTick][attackerID]; !exists {
+		c.perTickInfo[currentTick] = make(map[uint64]PlayerTickData)
+	}
+
+	if _, exists := c.perTickInfo[currentTick][victimID]; !exists {
+		c.perTickInfo[currentTick] = make(map[uint64]PlayerTickData)
+	}
+
+	attackerData := c.perTickInfo[currentTick][attackerID]
+	victimData := c.perTickInfo[currentTick][victimID]
+
+	if attackerData.DamageDealtToPlayer == nil {
+		attackerData.DamageDealtToPlayer = make(map[uint64]DamageDealt)
+	}
+
+	currentDamage := DamageDealt{
+		ArmorDamage:  e.ArmorDamageTaken,
+		HealthDamage: e.HealthDamageTaken,
+		HitGroup:     byte(e.HitGroup),
+	}
+
+	attackerData.DamageDealtToPlayer[victimID] = currentDamage
+
+	c.perTickInfo[currentTick][attackerID] = attackerData
+	c.perTickInfo[currentTick][victimID] = victimData
+}
+
+func (c *Collector) AnalyzeTimeToDamage() {
+	c.logger.Debug("Starting AnalyzeTimeToDamage")
+	c.logger.Debug("perTickInfo state", "numTicks", len(c.perTickInfo))
+
 	for tick, playerData := range c.perTickInfo {
-		for _, playerTick := range playerData {
-			if !playerTick.IsAlive {
-				continue // Ignore dead players
+		for steamID, playerTick := range playerData {
+			if !playerTick.IsAlive || playerTick.DamageDealtToPlayer == nil {
+				continue
 			}
 
-			if tick%10000 == 0 {
-				c.logger.Debug("Analyzing...",
-					"tick", tick,
-					"playerTick.PlayerName", playerTick.PlayerName,
-					"playerTick.Velocity2D", playerTick.Velocity2D,
-					"playerTick.Velocity3D", playerTick.Velocity3D,
-				)
-			}
-			// Find the first tick where the player saw an enemy before firing
-			/*if firstSightTick, exists := c.firstEnemySpottedTick(steamID, tick); exists {
-				timeToDamage := (tick - firstSightTick) * (1000 / 64) // Convert ticks to ms
+			for victimID, damage := range playerTick.DamageDealtToPlayer {
+				if playerTick.PlayerName == "shmeeny" {
+					c.logger.Debug("DamageDealtToPlayer",
+						"tick", tick,
+						"PlayerName", playerTick.PlayerName,
+						"PlayerID", playerTick.SteamID,
+						"VictimName", c.perTickInfo[tick][victimID].PlayerName,
+						"Damage", damage.HealthDamage,
+						"ArmorDamage", damage.ArmorDamage,
+						"PlayerPosition", playerTick.Position,
+						"VictimPosition", c.perTickInfo[tick][victimID].Position,
+					)
 
-				if timeToDamage < 1000 { // Exclude trigger discipline cases (1s+)
-					fmt.Printf("Player %d fired after %d ms (tick %d → %d)\n", steamID, timeToDamage, firstSightTick, tick)
-				} else {
-					fmt.Printf("Excluded trigger discipline for player %d (Time: %d ms, tick %d → %d)\n", steamID, timeToDamage, firstSightTick, tick)
 				}
-			}*/
+
+				if damage.HealthDamage > 0 {
+					firstSightTick, exists := c.findLastContinuousVisibilityStart(steamID, victimID, tick)
+					if !exists {
+						continue
+					}
+
+					timeToDamage := int64(tick-firstSightTick) * c.tickTime.Milliseconds()
+
+					if timeToDamage < 0 {
+						if playerTick.PlayerName == "shmeeny" {
+							c.logger.Warn("Negative reaction time detected!",
+								"player", playerTick.PlayerName,
+								"reactionTimeMs", timeToDamage,
+								"tick", tick,
+								"firstSightTick", firstSightTick)
+							continue
+						}
+					}
+
+					if timeToDamage >= 100 && timeToDamage < 1000 {
+						if playerTick.PlayerName == "shmeeny" {
+							c.logger.Debug("Player time to damage",
+								"player", playerTick.PlayerName,
+								"steamID", steamID,
+								"reactionTimeMs", timeToDamage,
+								"damageAmount", damage.HealthDamage)
+						}
+					} else {
+						if playerTick.PlayerName == "shmeeny" {
+							c.logger.Debug("Reaction time out of expected range",
+								"player", playerTick.PlayerName,
+								"reactionTimeMs", timeToDamage)
+						}
+					}
+				}
+			}
 		}
 	}
 }
+
+func (c *Collector) findLastContinuousVisibilityStart(playerID, targetID uint64, currentTick int) (int, bool) {
+	firstSeenTick := -1
+	lastSeenTick := -1
+	lostVisibilityTick := -1
+
+	for tick := currentTick; tick >= 0; tick-- { // Instead of stopping at `maxLookbackTicks`, iterate back to 0
+		playerData, exists := c.perTickInfo[tick]
+		if !exists {
+			continue
+		}
+
+		playerTick, exists := playerData[playerID]
+		if !exists || !playerTick.IsAlive {
+			continue
+		}
+
+		targetTick, exists := playerData[targetID]
+		if !exists || !targetTick.IsAlive {
+			continue
+		}
+
+		// EVIL TESTING HACK -- REMOVE ME
+		if playerTick.SteamID != 76561197991944713 {
+			continue
+		}
+		// END EVIL TESTING HACK -- REMOVE ME
+
+		isVisible := c.bspChecker.IsVisible(playerTick.Position, targetTick.Position, playerTick.ForwardVector())
+
+		if isVisible {
+			if lastSeenTick == -1 { // First tick of seeing the target
+				lastSeenTick = tick
+			}
+			firstSeenTick = tick    // Keep updating first seen tick
+			lostVisibilityTick = -1 // Reset lost visibility tracking
+		} else {
+			if lostVisibilityTick == -1 { // First tick visibility was lost
+				lostVisibilityTick = tick
+			}
+			if lastSeenTick != -1 { // Stop once we find a period where they were seen
+				break
+			}
+		}
+
+		// Ensure we do not force firstSeenTick to be only within the last 128 ticks
+		if tick == 0 && firstSeenTick != -1 {
+			return firstSeenTick, true
+		}
+	}
+
+	if firstSeenTick != -1 {
+		return firstSeenTick, true
+	}
+
+	return 0, false
+}
+
+/*func (c *Collector) findLastContinuousVisibilityStart(playerID, targetID uint64, currentTick int) (int, bool) {
+	const maxLookbackTicks = 128 // ~2 seconds at 64 tick
+
+	startTick := currentTick - maxLookbackTicks
+	if startTick < 0 {
+		startTick = 0
+	}
+
+	var firstSeenTick = -1
+	var lastSeenTick = -1
+	var lostVisibilityTick = -1
+
+	for tick := currentTick; tick >= startTick; tick-- {
+		playerData, exists := c.perTickInfo[tick]
+		if !exists {
+			continue
+		}
+
+		playerTick, exists := playerData[playerID]
+		if !exists || !playerTick.IsAlive {
+			continue
+		}
+
+		targetTick, exists := playerData[targetID]
+		if !exists || !targetTick.IsAlive {
+			continue
+		}
+
+		// EVIL TESTING HACK -- REMOVE ME
+		if playerTick.SteamID != 76561197991944713 {
+			continue
+		}
+		// END EVIL TESTING HACK -- REMOVE ME
+
+		isVisible := c.bspChecker.IsVisible(playerTick.Position, targetTick.Position, playerTick.ForwardVector())
+
+		if isVisible {
+			if lastSeenTick == -1 { // First moment of seeing the target
+				lastSeenTick = tick
+			}
+			firstSeenTick = tick    // Continuously update until visibility is lost
+			lostVisibilityTick = -1 // Reset if we regain sight
+		} else {
+			if lostVisibilityTick == -1 { // First tick where visibility was lost
+				lostVisibilityTick = tick
+			}
+
+			if lastSeenTick != -1 { // If we had seen them before, break here
+				break
+			}
+		}
+
+		if playerTick.PlayerName == "shmeeny" {
+			c.logger.Debug("LOS check",
+				"tick", tick,
+				"player", playerTick.PlayerName,
+				"target", targetTick.PlayerName,
+				"isVisible", isVisible)
+		}
+	}
+
+	if firstSeenTick != -1 {
+		return firstSeenTick, true
+	}
+
+	return 0, false
+}*/
+
+/*func (c *Collector) findLastContinuousVisibilityStart(playerID, targetID uint64, currentTick int) (int, bool) {
+	const maxLookbackTicks = 128 // ~2 seconds at 64 tick
+
+	startTick := currentTick - maxLookbackTicks
+	if startTick < 0 {
+		startTick = 0
+	}
+
+	var firstSpottedTick = -1
+	var lastSeenTick = -1
+
+	for tick := currentTick; tick >= startTick; tick-- {
+		playerData, exists := c.perTickInfo[tick]
+		if !exists {
+			continue
+		}
+
+		playerTick, exists := playerData[playerID]
+		if !exists || !playerTick.IsAlive {
+			continue
+		}
+
+		targetTick, exists := playerData[targetID]
+		if !exists || !targetTick.IsAlive {
+			continue
+		}
+
+		isVisible := c.bspChecker.IsVisible(playerTick.Position, targetTick.Position)
+		if playerTick.PlayerName == "shmeeny" {
+			c.logger.Debug("LOS check",
+				"tick", tick,
+				"player", playerTick.PlayerName,
+				"target", targetTick.PlayerName,
+				"isVisible", isVisible)
+		}
+
+		if isVisible {
+			if firstSpottedTick == -1 {
+				firstSpottedTick = tick // Store first sighting within lookback range
+			}
+			lastSeenTick = tick
+		} else if lastSeenTick != -1 {
+			firstSpottedTick = lastSeenTick
+			break
+		}
+	}
+
+	if firstSpottedTick != -1 {
+		return firstSpottedTick, true
+	}
+
+	return 0, false
+}*/
+
+/*func (c *Collector) AnalyzeTimeToDamage() {
+	for tick, playerData := range c.perTickInfo {
+		for _, playerTick := range playerData {
+			// Dead players can't be damaged
+			if !playerTick.IsAlive {
+				continue
+			}
+
+			// Find the first tick where the player saw an enemy
+			if firstSightTick, exists := c.firstEnemySpottedTick(playerTick.SteamID, tick); exists {
+				timeToDamage := int64(tick-firstSightTick) * c.tickTime.Milliseconds()
+
+				if timeToDamage < 1000 { // Exclude trigger discipline cases (1s+)
+					fmt.Printf("Player %d fired after %d ms (tick %d → %d)\n", playerTick.SteamID, timeToDamage, firstSightTick, tick)
+				} else {
+					fmt.Printf("Excluded trigger discipline for player %d (Time: %d ms, tick %d → %d)\n", playerTick.SteamID, timeToDamage, firstSightTick, tick)
+				}
+			}
+		}
+	}
+}
+
+func (c *Collector) firstEnemySpottedTick(steamID uint64, currentTick int) (int, bool) {
+	for tick := currentTick; tick >= 0; tick-- {
+		playerData, exists := c.perTickInfo[tick]
+		if !exists {
+			continue
+		}
+
+		// Get the player's data for this tick
+		playerTick, exists := playerData[steamID]
+		if !exists || !playerTick.IsAlive {
+			continue
+		}
+
+		// Check visibility against all enemies at this tick
+		sawEnemy := false
+		for _, enemyTick := range playerData {
+			if enemyTick.PlayerTeam != playerTick.PlayerTeam && enemyTick.IsAlive {
+				if c.bspChecker.IsVisible(playerTick.Position, enemyTick.Position) {
+					sawEnemy = true
+					break
+				}
+			}
+		}
+
+		// Found the moment before first enemy sighting
+		if !sawEnemy && tick < currentTick {
+			return tick + 1, true
+		}
+	}
+	return 0, false
+}*/

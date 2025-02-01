@@ -506,7 +506,7 @@ func extractBSPFromVPK(vpkPath, mapName, outputDir string) error {
 }
 
 // IsVisible determines if there's a clear line of sight between two points
-func (b *BSPVisibilityChecker) IsVisible(from, to r3.Vector) bool {
+/*func (b *BSPVisibilityChecker) IsVisible(from, to r3.Vector) bool {
 	// Simple distance check first
 	direction := to.Sub(from)
 	distance := direction.Norm()
@@ -522,6 +522,47 @@ func (b *BSPVisibilityChecker) IsVisible(from, to r3.Vector) bool {
 	// Convert to local coords
 	start := Vector3{float32(from.X), float32(from.Y), float32(from.Z)}
 	end := Vector3{float32(to.X), float32(to.Y), float32(to.Z)}
+
+	// Check main visibility line
+	return !b.bspData.hasVisualBlocker(start, end)
+}*/
+
+func (b *BSPVisibilityChecker) IsVisible(from, to, playerForward r3.Vector) bool {
+	// Simple distance check first
+	direction := to.Sub(from)
+	distance := direction.Norm()
+	if distance > 2000 {
+		return false
+	}
+
+	// Normalize vectors
+	directionToTarget := direction.Normalize()
+	playerViewDirection := playerForward.Normalize()
+
+	// Calculate the dot product
+	dot := directionToTarget.Dot(playerViewDirection)
+
+	// Convert FOV threshold to radians (e.g., 90 degrees)
+	fovThreshold := math.Cos(90 * (math.Pi / 180)) // 90 degrees in radians
+
+	if dot < fovThreshold {
+		return false // Target is outside of player's FOV
+	}
+
+	// Early out if BSP data isn't loaded
+	if b.bspData == nil {
+		return false
+	}
+
+	// Convert to local coords
+	start := Vector3{float32(from.X), float32(from.Y), float32(from.Z)}
+	end := Vector3{float32(to.X), float32(to.Y), float32(to.Z)}
+
+	b.logger.Debug("Visibility check",
+		"player", from,
+		"target", to,
+		"distance", distance,
+		"result", !b.bspData.hasVisualBlocker(start, end))
 
 	// Check main visibility line
 	return !b.bspData.hasVisualBlocker(start, end)

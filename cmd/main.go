@@ -116,6 +116,7 @@ func handleAnalyze(demoPath, playerName, steamID string, debug, verbose bool) {
 
 	c := parser.NewCollector(logger)
 	match, err := c.Collect(demoPath)
+	c.AnalyzeTimeToDamage()
 	logger.Error("Error collecting demo data from demoPath: %s err: %s\n", demoPath, err)
 
 	mapName := match.MapName

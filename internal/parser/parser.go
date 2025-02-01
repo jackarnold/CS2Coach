@@ -925,9 +925,10 @@ func (p *Parser) rayVisible(obs PlayerFrameData, tgt PlayerFrameData) bool {
 	}
 
 	// Map visibility check
-	if p.BspChecker != nil && !p.BspChecker.IsVisible(obs.Position, tgt.Position) {
+	// comment out because broken by updates
+	/*if p.BspChecker != nil && !p.BspChecker.IsVisible(obs.Position, tgt.Position) {
 		return false
-	}
+	}*/
 
 	// FOV check only - remove the redundant angle checks
 	horizontalFOV := p.calculateFOV(obs.Position, tgt.Position, obs.ViewAngleX)
