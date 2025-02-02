@@ -107,6 +107,23 @@ type PlayerModel struct {
 	HitboxNames     map[int32]string
 }
 
+func (pm *PlayerModel) String() string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("PlayerModel:\n"))
+	b.WriteString(fmt.Sprintf("  Heights: Standing=%.2f, Crouching=%.2f\n", pm.StandingHeight, pm.CrouchingHeight))
+	b.WriteString(fmt.Sprintf("  Width: %.2f\n", pm.Width))
+	b.WriteString("  Hitboxes:\n")
+
+	for i, hb := range pm.Hitboxes {
+		name := pm.HitboxNames[hb.Group]
+		b.WriteString(fmt.Sprintf("    [%d] %s (Group=%d):\n", i, name, hb.Group))
+		b.WriteString(fmt.Sprintf("      Mins: {X: %.2f, Y: %.2f, Z: %.2f}\n", hb.Mins.X, hb.Mins.Y, hb.Mins.Z))
+		b.WriteString(fmt.Sprintf("      Maxs: {X: %.2f, Y: %.2f, Z: %.2f}\n", hb.Maxs.X, hb.Maxs.Y, hb.Maxs.Z))
+	}
+
+	return b.String()
+}
+
 // Material penetration properties
 type MaterialProperties struct {
 	penetrationModifier float32
@@ -211,7 +228,7 @@ func (b *BSPVisibilityChecker) LoadSource2MapFiles(mapDir string) error {
 	return nil
 }
 
-func (b *BSPVisibilityChecker) LoadPlayerModel() error {
+/*func (b *BSPVisibilityChecker) LoadPlayerModel() error {
 	if b.worldData == nil {
 		return fmt.Errorf("world data not loaded")
 	}
@@ -243,6 +260,125 @@ func (b *BSPVisibilityChecker) LoadPlayerModel() error {
 	b.playerModel = model
 
 	return nil
+}*/
+
+func (b *BSPVisibilityChecker) LoadPlayerModel() error {
+	modelData, err := os.ReadFile(`C:\Users\richa\go\src\github.com\richardkiene\CS2Coach\internal\parser\ctm_sas_model.txt`)
+	if err != nil {
+		return fmt.Errorf("failed to load model data: %v", err)
+	}
+
+	model, err := b.parseKV3ModelData(modelData)
+	if err != nil {
+		return fmt.Errorf("failed to parse model data: %v", err)
+	}
+
+	b.playerModel = model
+	return nil
+}
+
+func (b *BSPVisibilityChecker) parseKV3ModelData(data []byte) (*PlayerModel, error) {
+	parser := NewKV3Parser(string(data))
+	parsed, err := parser.Parse()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse KV3 model data: %v", err)
+	}
+
+	modelData, ok := parsed.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid KV3 model data format")
+	}
+
+	hitboxSets, ok := modelData["m_hitboxsets"].([]interface{})
+	if !ok || len(hitboxSets) == 0 {
+		return nil, fmt.Errorf("no hitbox sets found")
+	}
+
+	var csHitboxSet map[string]interface{}
+	for _, set := range hitboxSets {
+		setMap, ok := set.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if key, ok := setMap["key"].(string); ok && key == "cstrike" {
+			if value, ok := setMap["value"].(map[string]interface{}); ok {
+				csHitboxSet = value
+				break
+			}
+		}
+	}
+
+	if csHitboxSet == nil {
+		return nil, fmt.Errorf("cstrike hitbox set not found")
+	}
+
+	hitboxes, ok := csHitboxSet["m_HitBoxes"].([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("no hitboxes found")
+	}
+
+	model := &PlayerModel{
+		StandingHeight:  72.0,
+		CrouchingHeight: 54.0,
+		Width:           32.0,
+		HitboxNames:     make(map[int32]string),
+		Hitboxes:        make([]ModelHitbox, 0, len(hitboxes)),
+	}
+
+	for _, hb := range hitboxes {
+		hitbox, ok := hb.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		name := hitbox["m_name"].(string)
+		var group int32
+		value, ok := hitbox["m_nGroupId"]
+		if !ok {
+			// Handle the missing key error
+			panic("m_nGroupId not found in hitbox")
+		}
+
+		if v, ok := value.(float64); ok {
+			group = int32(v)
+		} else if v, ok := value.(int); ok {
+			group = int32(v)
+		} else {
+			panic(fmt.Sprintf("unexpected type %T for m_nGroupId", value))
+		}
+
+		minBounds, ok := hitbox["m_vMinBounds"].([]interface{})
+		maxBounds, ok2 := hitbox["m_vMaxBounds"].([]interface{})
+		if !ok || !ok2 || len(minBounds) != 3 || len(maxBounds) != 3 {
+			continue
+		}
+
+		modelHitbox := ModelHitbox{
+			Mins: Vector3{
+				X: float32(minBounds[0].(float64)),
+				Y: float32(minBounds[1].(float64)),
+				Z: float32(minBounds[2].(float64)),
+			},
+			Maxs: Vector3{
+				X: float32(maxBounds[0].(float64)),
+				Y: float32(maxBounds[1].(float64)),
+				Z: float32(maxBounds[2].(float64)),
+			},
+			Group:  group,
+			NameID: group,
+		}
+
+		model.Hitboxes = append(model.Hitboxes, modelHitbox)
+		model.HitboxNames[group] = name
+	}
+
+	if len(model.Hitboxes) == 0 {
+		return nil, fmt.Errorf("no valid hitboxes found in model data")
+	} else {
+		b.logger.Debug("loaded KV3 PlayerModel", "model", model)
+	}
+
+	return model, nil
 }
 
 func (b *BSPVisibilityChecker) loadModelFile(modelPath string) ([]byte, error) {
