@@ -390,7 +390,7 @@ func (p *KV3Parser) parseKey() (string, string, error) {
 		var ok bool
 		key, ok = s.(string)
 		if !ok {
-			return "", "", errors.New("Parsed key is not a string")
+			return "", "", errors.New("parsed key is not a string")
 		}
 	} else {
 		start := p.index
@@ -426,34 +426,4 @@ func (p *KV3Parser) parseKey() (string, string, error) {
 		}
 	}
 	return key, flag, nil
-}
-
-// kv3Deserialize is a helper function that deserializes the KV3 input into native Go types.
-func kv3Deserialize(kv3Content string) (interface{}, error) {
-	parser := NewKV3Parser(kv3Content)
-	return parser.Parse()
-}
-
-// Example usage.
-func main() {
-	// Example KV3 content. Adjust or replace with your own test string.
-	example := `<!-- kv3 encoding:text:version{1} format:generic:version{1} -->
-{
-    "name" = "Example",
-    "values" = [ 1, 2, 3 ],
-    subclass: {
-        "subkey" = "subvalue"
-    },
-    key_with_flag:resource = "flagged value"
-}`
-
-	parsedData, err := kv3Deserialize(example)
-	if err != nil {
-		fmt.Println("Error parsing KV3:", err)
-		return
-	}
-
-	// Print the resulting Go data structure.
-	// Objects are represented as map[string]interface{} and arrays as []interface{}.
-	fmt.Printf("Deserialized KV3 data:\n%#v\n", parsedData)
 }
